@@ -1,0 +1,17 @@
+{
+  "name": "train-simulator-gateway",
+  "version": "0.1.0",
+  "private": true,
+  "description": "WebSocket JSON gateway for the Vande Bharat cockpit experience. Broadcasts lever/speed, door, and metrics data to Unity clients (main screen, metrics screens, iPad app). The data source (currently a stand-in HID signal, later real lever hardware) is isolated in src/lib/data-source.js so swapping hardware never changes the JSON contract clients rely on.",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "ws": "^8.18.0",
+    "node-hid": "^3.1.2"
+  }
+}
