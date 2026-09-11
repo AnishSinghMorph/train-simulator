@@ -63,6 +63,22 @@ message to every connected client:
 | `metrics` | object | Data to show on the metrics screen. **Fields shown are placeholders, not confirmed** — see below. |
 | `source` | string | Debug info only — tells you whether this update came from real test hardware, a stand-in signal, or the simulator. Ignore it in your UI; it won't be in the final production shape. |
 
+## Sending the door-open trigger (iPad -> this server)
+
+When the iPad's door button is clicked, send this JSON as a WebSocket text
+message on the SAME connection you're already receiving updates on:
+
+```json
+{ "type": "door_open" }
+```
+
+No other fields needed — it's a one-shot trigger, not a state you set. This
+server forwards it on to the external door-control system (hardware side —
+still being integrated on our end) and briefly reflects `door_open: true` in
+the broadcast JSON for ~1 second so any screen watching can show visual
+confirmation, then resets it to `false`. That reflected value is just a
+confirmation pulse, not the authoritative door state.
+
 ### Minimal client example (C#, conceptual)
 
 ```csharp
@@ -74,23 +90,26 @@ ws.OnMessage += (bytes) => {
     // state.lever_speed, state.door_open, state.metrics.speed_kmh, ...
 };
 ws.Connect();
+
+// On the iPad's door button click:
+ws.SendText("{\"type\":\"door_open\"}");
 ```
 
 (Exact serialization approach — `JsonUtility` vs Newtonsoft — is up to you;
 the server just sends plain JSON text frames.)
 
-## Known open questions (backend team is tracking these — don't build final assumptions around them yet)
+## Status of open questions
 
-1. **`metrics` fields aren't finalized.** Tell us exactly what should show on
-   the metrics screen and we'll lock the schema.
-2. **`door_open` direction of control is unconfirmed.** Does the iPad's open
-   button need to send a command back to this server (so it can trigger a
-   physical door), or is the door entirely handled on your side and this
-   field is just for display/sync? Let us know.
-3. **Update rate (currently ~100ms) and exact WebSocket usage** haven't been
-   explicitly confirmed as the right fit for your video-speed control — flag
-   if you need something different (e.g. a different cadence, or receiving
-   deltas instead of absolute values).
+1. **`metrics` fields** — confirmed OK to keep as placeholder for now;
+   fields will be added/removed as needed once the client decides between
+   dummy vs. real captured data.
+2. **`door_open` direction** — confirmed: Unity (iPad) sends the trigger to
+   this server, see "Sending the door-open trigger" above. On our side, the
+   forward-to-hardware leg is still a stub (`src/lib/door-controller.js`)
+   since the external door system isn't finalized yet — this doesn't block
+   you, the WebSocket message you send is already handled correctly.
+3. **Update rate / deltas vs absolute** — confirmed fine as-is (~100ms,
+   absolute values).
 
 ## For the backend team (not the Unity dev)
 
