@@ -111,13 +111,4 @@ the server just sends plain JSON text frames.)
 3. **Update rate / deltas vs absolute** — confirmed fine as-is (~100ms,
    absolute values).
 
-## For the backend team (not the Unity dev)
 
-Full project context, the hardware diagnostic writeup, and what's planned
-next lives in `CLAUDE.md` locally on the backend dev's machine — it is
-**intentionally excluded from this repo** (see `.gitignore`) since it
-contains internal client/project details not meant for this shared
-codebase. The only file that should need to change when real lever hardware
-arrives is `src/lib/data-source.js` (and whatever new source file it points
-to) — `src/server.js` and this README's JSON contract should not need to
-change.
