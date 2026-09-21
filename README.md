@@ -45,7 +45,7 @@ message to every connected client:
 
 ```json
 {
-  "lever_speed": 0.42,
+  "lever_speed": 1,
   "door_open": false,
   "metrics": {
     "speed_kmh": 84,
@@ -59,7 +59,7 @@ message to every connected client:
 
 | Field | Type | Meaning |
 |---|---|---|
-| `lever_speed` | float, 0–1 | Normalized lever/throttle position. Use this to drive the main screen's video/camera playback speed. |
+| `lever_speed` | `0` or `1` | All-or-nothing throttle gate: `1` only when both physical levers are fully pushed together, `0` otherwise. Use this to trigger the main screen's video play/enable — no gradual ramp needed, the source video already has that baked in. |
 | `door_open` | boolean | Door state. **Not finalized** — see "Known open questions" below. |
 | `metrics` | object | Data to show on the metrics screen. **Fields shown are placeholders, not confirmed** — see below. |
 | `source` | string | Debug info only — tells you whether this update came from real test hardware, a stand-in signal, or the simulator. Ignore it in your UI; it won't be in the final production shape. |
