@@ -5,9 +5,10 @@ data-metric values — for the Vande Bharat cockpit experience. Built for the
 Unity apps (main screen, metrics screens, iPad) to connect to.
 
 **Status: early boilerplate.** The data you'll receive right now comes from
-a stand-in test signal, not the final installed lever hardware (which
-doesn't exist yet). The JSON shape below is what you should build against —
-it will not change when the real hardware is swapped in on the backend.
+a test lever (a Thrustmaster TCA throttle quadrant), not the final installed
+exhibit hardware (which doesn't exist yet). The JSON shape below is what you
+should build against — it will not change when the real hardware is swapped
+in on the backend.
 
 ## Running it
 
@@ -20,7 +21,7 @@ You'll see something like:
 
 ```
 [server] WebSocket gateway listening on ws://0.0.0.0:8080
-[data-source] Flight Yoke found — running in STAND-IN mode (pitch axis substitutes for lever_speed).
+[data-source] Thrustmaster TCA quadrant found — running with REAL lever hardware (Engine 1 axis -> lever_speed).
 ```
 
 If no test hardware is plugged in (e.g. you're building on your own machine),
@@ -50,7 +51,7 @@ message to every connected client:
     "speed_kmh": 84,
     "distance_km": 12.3
   },
-  "source": "hid-yoke-standin"
+  "source": "hid-tca"
 }
 ```
 
