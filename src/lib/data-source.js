@@ -59,6 +59,17 @@ class CombinedSource extends EventEmitter {
     }
   }
 
+  // Lets server.js set simulation_open directly (e.g. a Unity client
+  // pressing "P" and sending a WebSocket trigger) using the exact same
+  // internal field the Arduino writes to — so whichever wrote last is
+  // what every subsequent emit (including plain lever ticks) reflects.
+  // Setting it here instead of overwriting broadcast JSON in server.js
+  // avoids a race where the next lever update would silently revert it.
+  setSimulationOpen(value) {
+    this._simulationOpen = value;
+    this._emit();
+  }
+
   _emit() {
     this.emit('update', {
       ...this._leverState,

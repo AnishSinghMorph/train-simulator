@@ -76,6 +76,28 @@ message to every connected client:
 
 **`lever_speed` and `simulation_open` come from two completely independent physical controls** — a button press never changes `lever_speed`, and moving the lever never changes `simulation_open`.
 
+## Sending a simulation_open/close trigger (any Unity screen -> this server)
+
+`simulation_open` isn't only driven by the Arduino buttons — **any connected
+client can trigger it too**, and the trigger is broadcast to every other
+connected screen. This is for exactly the case where you want one keypress
+(e.g. "P") on any one of your Unity apps to open/start every screen at
+once, instead of clicking into and triggering each one individually:
+
+```json
+{ "type": "simulation_open" }
+```
+```json
+{ "type": "simulation_close" }
+```
+
+Send either as a WebSocket text message on the same connection you're
+already receiving updates on. Like the Arduino buttons, this is a latched
+state, not a pulse — `simulation_open` stays `true`/`false` until something
+(the Arduino, or another trigger like this) changes it again. Whichever
+source (Arduino or a client trigger) wrote last is what every subsequent
+broadcast reflects.
+
 ## Sending the door-open trigger (iPad -> this server)
 
 When the iPad's door button is clicked, send this JSON as a WebSocket text

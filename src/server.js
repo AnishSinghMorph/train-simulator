@@ -9,7 +9,11 @@
  *
  * INBOUND: accepts a door-open trigger message from the Unity iPad app
  * (button click) and forwards it to the "External" system via
- * lib/door-controller.js (currently a stub — see that file).
+ * lib/door-controller.js (currently a stub — see that file). Also accepts
+ * simulation_open / simulation_close triggers from any Unity client (e.g.
+ * a keypress on one screen) so a single press can open/close the
+ * simulation for every connected screen at once, same field the Arduino
+ * pushbuttons drive.
  *
  * Run: npm install && npm start
  * Config: set PORT env var to change the listening port (default 8080).
@@ -61,6 +65,18 @@ function handleInboundMessage(raw) {
     // the source of truth for actual door position, once integrated).
     broadcast({ ...latestState, door_open: true });
     setTimeout(() => broadcast({ ...latestState, door_open: false }), 1000);
+    return;
+  }
+
+  if (msg && msg.type === 'simulation_open') {
+    console.log('[server] simulation_open trigger received from a client');
+    if (dataSource) dataSource.setSimulationOpen(true);
+    return;
+  }
+
+  if (msg && msg.type === 'simulation_close') {
+    console.log('[server] simulation_close trigger received from a client');
+    if (dataSource) dataSource.setSimulationOpen(false);
     return;
   }
 
