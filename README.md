@@ -1,14 +1,17 @@
 # Train Simulator Gateway
 
-A small WebSocket server that broadcasts live JSON — lever/speed, door, and
-data-metric values — for the Vande Bharat cockpit experience. Built for the
-Unity apps (main screen, metrics screens, iPad) to connect to.
+A small WebSocket server that broadcasts live JSON — lever/speed, door,
+data-metric, and simulation open/close values — for the Vande Bharat
+cockpit experience. Built for the Unity apps (main screen, metrics screens,
+iPad) to connect to.
 
-**Status: early boilerplate.** The data you'll receive right now comes from
-a test lever (a Thrustmaster TCA throttle quadrant), not the final installed
-exhibit hardware (which doesn't exist yet). The JSON shape below is what you
-should build against — it will not change when the real hardware is swapped
-in on the backend.
+**Status: early boilerplate.** Two independent physical controls feed this
+right now, neither of which is final exhibit hardware: a test lever (a
+Thrustmaster TCA throttle quadrant) driving `lever_speed`, and an Arduino
+Leonardo with two industrial pushbuttons (BLACK/RED) driving
+`simulation_open`. The JSON shape below is what you should build against —
+it will not change when either piece of hardware is swapped out on the
+backend.
 
 ## Running it
 
@@ -21,14 +24,19 @@ You'll see something like:
 
 ```
 [server] WebSocket gateway listening on ws://0.0.0.0:8080
-[data-source] Thrustmaster TCA quadrant found — running with REAL lever hardware (Engine 1 axis -> lever_speed).
+[data-source] Thrustmaster TCA quadrant found — running with REAL lever hardware (gated: both levers must reach full push together).
+[arduino] initializing...
+[arduino] Leonardo detected
+[arduino] connected
 ```
 
-If no test hardware is plugged in (e.g. you're building on your own machine),
-it automatically falls back to a simulated smooth oscillating signal instead
-of failing — you'll see `SIMULATED mode` in the log, and still get live,
-changing JSON to build against. Either way, connecting a client works
-identically.
+If no lever hardware is plugged in (e.g. you're building on your own
+machine), it automatically falls back to a simulated smooth oscillating
+`lever_speed` instead of failing — you'll see `SIMULATED mode` in the log,
+and still get live, changing JSON to build against. If the Arduino isn't
+plugged in, you'll see `[arduino] not detected — hardware controls
+unavailable` and `simulation_open` just stays `false`. Either way,
+connecting a client works identically.
 
 ## Connecting
 
@@ -51,7 +59,8 @@ message to every connected client:
     "speed_kmh": 84,
     "distance_km": 12.3
   },
-  "source": "hid-tca"
+  "source": "hid-tca",
+  "simulation_open": false
 }
 ```
 
@@ -59,10 +68,13 @@ message to every connected client:
 
 | Field | Type | Meaning |
 |---|---|---|
-| `lever_speed` | `0` or `1` | All-or-nothing throttle gate: `1` only when both physical levers are fully pushed together, `0` otherwise. Use this to trigger the main screen's video play/enable — no gradual ramp needed, the source video already has that baked in. |
+| `lever_speed` | `0` or `1` | All-or-nothing throttle gate, driven by the physical lever hardware (TCA quadrant / Flight Yoke stand-in / simulated). `1` only when both physical levers are fully pushed together, `0` otherwise. Use this to trigger the main screen's video play/enable — no gradual ramp needed, the source video already has that baked in. |
 | `door_open` | boolean | Door state. **Not finalized** — see "Known open questions" below. |
 | `metrics` | object | Data to show on the metrics screen. **Fields shown are placeholders, not confirmed** — see below. |
-| `source` | string | Debug info only — tells you whether this update came from real test hardware, a stand-in signal, or the simulator. Ignore it in your UI; it won't be in the final production shape. |
+| `source` | string | Debug info only — tells you whether `lever_speed` came from real test hardware, a stand-in signal, or the simulator. Ignore it in your UI; it won't be in the final production shape. |
+| `simulation_open` | boolean | Driven independently by two physical pushbuttons (separate from the lever). `true` after the BLACK button is pressed (session/experience should be active — BLACK is also what launches the Unity apps in the first place, via a startup script, before this even matters). `false` after the RED button is pressed (session should stop/close — e.g. stop the main screen video). How exactly this interacts with `lever_speed` on your end is up to you; we just broadcast the raw button state. |
+
+**`lever_speed` and `simulation_open` come from two completely independent physical controls** — a button press never changes `lever_speed`, and moving the lever never changes `simulation_open`.
 
 ## Sending the door-open trigger (iPad -> this server)
 

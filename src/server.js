@@ -31,6 +31,7 @@ let latestState = {
   metrics: {},
   source: 'startup'
 };
+let dataSource = null;
 
 function broadcast(state) {
   const payload = JSON.stringify(state);
@@ -85,14 +86,19 @@ wss.on('connection', (ws, req) => {
   });
 });
 
-const dataSource = createDataSource();
-dataSource.on('update', (state) => {
-  latestState = state;
-  broadcast(state);
+createDataSource().then((ds) => {
+  dataSource = ds;
+  ds.on('update', (state) => {
+    if (state.lever_speed !== latestState.lever_speed) {
+      console.log(`[server] lever_speed changed: ${latestState.lever_speed} -> ${state.lever_speed}`);
+    }
+    latestState = state;
+    broadcast(state);
+  });
 });
 
 process.on('SIGINT', () => {
   console.log('\n[server] shutting down...');
-  dataSource.stop();
+  if (dataSource) dataSource.stop();
   wss.close(() => process.exit(0));
 });
