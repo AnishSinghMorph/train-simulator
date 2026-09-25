@@ -1,26 +1,31 @@
 /*
- * Arduino Leonardo firmware for the two industrial pushbuttons:
- *   BLACK button (D9) -> START / ACCELERATION
- *   RED button   (D8) -> STOP
+ * Arduino Leonardo firmware v2 — reports PHYSICAL buttons only. What each
+ * button does (launch apps / pause / horn) is decided in Node
+ * (src/lib/data-source.js), so remapping never needs a reflash.
  *
- * Wiring (already verified working by hand-testing via Serial Monitor):
+ * Wiring (all use INPUT_PULLUP, other terminal to GND):
  *   BLACK: NO contact, terminal 3 -> GND, terminal 4 -> D9
- *     - INPUT_PULLUP idle = HIGH, pressed closes to GND = LOW
+ *          idle HIGH, pressed LOW
  *   RED:   NC contact, terminal 1 -> GND, terminal 2 -> D8
- *     - NC means idle is already closed to GND = LOW, pressed OPENS the
- *       contact so the pull-up brings it HIGH
+ *          idle LOW (closed to GND), pressed HIGH (contact opens)
+ *          (X1/X2 are the 230V lamp terminals - NOT connected to Arduino)
+ *   HORN:  NO contact, one terminal -> GND, other -> D7
+ *          idle HIGH, pressed LOW
  *
- * Emits one line per press/release, plain text, no repeats while a button
- * is held (debounced): START_PRESS, START_RELEASE, STOP_PRESS, STOP_RELEASE
+ * Output, one line per debounced press/release (never repeats while held):
+ *   BLACK_PRESS  BLACK_RELEASE  RED_PRESS  RED_RELEASE  HORN_PRESS  HORN_RELEASE
+ * Plus "READY leonardo-buttons v2" once at boot.
+ *
+ * Debounce: a change is only reported after the pin has been stable for
+ * DEBOUNCE_MS. That rejects contact bounce AND short noise spikes (the RED
+ * button housing carries a 230V lamp), at the cost of DEBOUNCE_MS latency.
  */
 
-const int BLACK_PIN = 9;
-const int RED_PIN = 8;
-const unsigned long DEBOUNCE_MS = 30;
+const unsigned long DEBOUNCE_MS = 20;
 
 struct Button {
   int pin;
-  bool pressedWhenHigh; // BLACK: pressed = LOW -> false. RED: pressed = HIGH -> true.
+  bool pressedWhenHigh;
   bool lastReading;
   bool stableState;
   unsigned long lastChangeTime;
@@ -28,38 +33,51 @@ struct Button {
   const char* releaseMsg;
 };
 
-Button blackButton = { BLACK_PIN, false, HIGH, HIGH, 0, "START_PRESS", "START_RELEASE" };
-Button redButton   = { RED_PIN,   true,  LOW,  LOW,  0, "STOP_PRESS",  "STOP_RELEASE" };
+Button buttons[] = {
+  { 9, false, HIGH, HIGH, 0, "BLACK_PRESS", "BLACK_RELEASE" },
+  { 8, true,  LOW,  LOW,  0, "RED_PRESS",   "RED_RELEASE" },
+  { 7, false, HIGH, HIGH, 0, "HORN_PRESS",  "HORN_RELEASE" }
+};
+const int BUTTON_COUNT = sizeof(buttons) / sizeof(buttons[0]);
 
 void setup() {
-  pinMode(BLACK_PIN, INPUT_PULLUP);
-  pinMode(RED_PIN, INPUT_PULLUP);
   Serial.begin(9600);
-
-  // Seed with the current physical state so we don't fire a spurious
-  // press/release event just from powering on.
-  blackButton.lastReading = digitalRead(BLACK_PIN);
-  blackButton.stableState = blackButton.lastReading;
-  redButton.lastReading = digitalRead(RED_PIN);
-  redButton.stableState = redButton.lastReading;
+  for (int i = 0; i < BUTTON_COUNT; i++) {
+    pinMode(buttons[i].pin, INPUT_PULLUP);
+    // Seed with the current physical state so boot never fires a fake event.
+    buttons[i].lastReading = digitalRead(buttons[i].pin);
+    buttons[i].stableState = buttons[i].lastReading;
+  }
 }
 
 void serviceButton(Button &b) {
   bool reading = digitalRead(b.pin);
+  unsigned long now = millis();
 
   if (reading != b.lastReading) {
-    b.lastChangeTime = millis();
+    b.lastChangeTime = now;
     b.lastReading = reading;
   }
 
-  if ((millis() - b.lastChangeTime) > DEBOUNCE_MS && reading != b.stableState) {
+  if (reading != b.stableState && (now - b.lastChangeTime) >= DEBOUNCE_MS) {
     b.stableState = reading;
     bool isPressed = b.pressedWhenHigh ? (reading == HIGH) : (reading == LOW);
     Serial.println(isPressed ? b.pressMsg : b.releaseMsg);
   }
 }
 
+bool announced = false;
+
 void loop() {
-  serviceButton(blackButton);
-  serviceButton(redButton);
+  // Leonardo's USB serial only delivers once the host has opened the port,
+  // so announce the version on first connection rather than in setup().
+  if (!announced && Serial) {
+    Serial.println("READY leonardo-buttons v2");
+    announced = true;
+  }
+  if (!Serial) announced = false;
+
+  for (int i = 0; i < BUTTON_COUNT; i++) {
+    serviceButton(buttons[i]);
+  }
 }

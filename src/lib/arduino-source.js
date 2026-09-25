@@ -1,152 +1,138 @@
 'use strict';
 /**
- * REAL button data source: two industrial pushbuttons (BLACK = open the
- * simulation, RED = close it — exact downstream behavior TBD, this is
- * just the open/close signal) wired to an Arduino Leonardo (D9, D8), read
- * over USB serial.
+ * Arduino Leonardo pushbuttons, read over USB serial (the Leonardo exposes
+ * no HID interface with this firmware — confirmed via node-hid — only a
+ * USB CDC serial port, vendorId 2341).
  *
- * IMPORTANT: this is NOT the lever/acceleration control. That's still
- * exclusively driven by whichever lever source wins in data-source.js
- * (TCA quadrant / Flight Yoke / simulated). This source runs independently
- * alongside the lever source and only contributes `simulation_open` to the
- * broadcast — it must never touch lever_speed.
+ * Firmware (firmware/leonardo-buttons/leonardo-buttons.ino) reports PHYSICAL
+ * buttons only, one debounced line per press/release:
+ *   BLACK_PRESS / BLACK_RELEASE / RED_PRESS / RED_RELEASE /
+ *   HORN_PRESS / HORN_RELEASE
+ * What each button MEANS is decided in data-source.js, so remapping a
+ * button never needs a reflash. Legacy v1 firmware names (START_* = BLACK,
+ * STOP_* = RED) are still accepted in case a board wasn't reflashed.
  *
- * Confirmed via node-hid enumeration that this Leonardo exposes NO HID
- * interface with its current firmware (plain digitalRead + Serial, no
- * Keyboard.h) — only a USB CDC serial port (vendorId 2341, Arduino LLC).
- * So this is read with the `serialport` package, not node-hid like the
- * other sources. HID (Keyboard.h) was deliberately avoided even as an
- * option: it would inject real OS keystrokes into whatever window has
- * focus, which is wrong for a kiosk exhibit.
+ * Emits 'button' { button: 'black'|'red'|'horn', pressed: bool }.
  *
- * Protocol (see firmware/leonardo-buttons/leonardo-buttons.ino), one
- * line per press/release, already debounced in firmware:
- *   START_PRESS / START_RELEASE / STOP_PRESS / STOP_RELEASE
- * (firmware wire protocol names kept as-is; Node interprets them as
- * open/close rather than start/stop of acceleration.)
- *
- * These are momentary industrial buttons (push BLACK to open, push RED to
- * close), not hold-to-run — BLACK latches simulation_open to true, RED
- * latches it back to false. RELEASE events are logged only — they don't
- * change state.
- *
- * start() is async (unlike the other sources) because listing serial
- * ports has no synchronous API — see data-source.js, which awaits it.
+ * Hot-plug: keeps checking every few seconds while not connected and
+ * reconnects automatically after an unplug — no server restart needed.
  */
 
 const EventEmitter = require('events');
+const { createLogger } = require('./log');
+
+const log = createLogger('arduino');
 
 const ARDUINO_VENDOR_ID = '2341'; // Arduino LLC
-const BAUD_RATE = 9600;
+const BAUD_RATE = 9600; // ignored by native-USB Leonardo, must just match firmware
+const RECONNECT_MS = 3000;
+
+const LINES = {
+  BLACK_PRESS: ['black', true], BLACK_RELEASE: ['black', false],
+  RED_PRESS: ['red', true], RED_RELEASE: ['red', false],
+  HORN_PRESS: ['horn', true], HORN_RELEASE: ['horn', false],
+  START_PRESS: ['black', true], START_RELEASE: ['black', false],
+  STOP_PRESS: ['red', true], STOP_RELEASE: ['red', false]
+};
 
 class ArduinoSource extends EventEmitter {
   constructor() {
     super();
     this._port = null;
-    this._simulationOpen = false; // latched open/close state
+    this._retryTimer = null;
+    this._stopped = false;
+    this._warnedMissing = false;
   }
 
-  /**
-   * Returns a Promise<boolean> — true if the Arduino was found and
-   * opened, false if the caller should fall back to the next source.
-   */
-  async start() {
-    console.log('[arduino] initializing...');
-
-    let SerialPort, ReadlineParser;
+  start() {
     try {
-      ({ SerialPort, ReadlineParser } = require('serialport'));
+      ({ SerialPort: this._SerialPort, ReadlineParser: this._ReadlineParser } = require('serialport'));
     } catch (err) {
-      console.warn('[arduino] ERROR: serialport package not available:', err.message);
-      return false;
+      log.error('serialport package not available:', err.message);
+      return;
     }
+    log.info('initializing...');
+    this._tryOpen();
+  }
 
-    let matchPath = process.env.ARDUINO_PORT || null;
+  async _tryOpen() {
+    if (this._stopped) return;
 
-    if (!matchPath) {
-      let ports;
+    let path = process.env.ARDUINO_PORT || null;
+    if (!path) {
       try {
-        ports = await SerialPort.list();
+        const ports = await this._SerialPort.list();
+        const match = ports.find((p) => (p.vendorId || '').toLowerCase() === ARDUINO_VENDOR_ID);
+        path = match && match.path;
       } catch (err) {
-        console.warn('[arduino] ERROR: failed to list serial ports:', err.message);
-        return false;
+        log.error('failed to list serial ports:', err.message);
       }
-      const match = ports.find((p) => (p.vendorId || '').toLowerCase() === ARDUINO_VENDOR_ID);
-      if (!match) {
-        console.warn('[arduino] not detected — hardware controls unavailable');
-        return false;
-      }
-      matchPath = match.path;
     }
 
-    console.log('[arduino] Leonardo detected');
+    if (!path) {
+      if (!this._warnedMissing) {
+        log.warn(`not detected — will keep checking every ${RECONNECT_MS / 1000}s (keyboard fallback active)`);
+        this._warnedMissing = true;
+      }
+      this._scheduleRetry();
+      return;
+    }
 
-    // SerialPort opens asynchronously (autoOpen defaults to true) and never
-    // throws synchronously for a bad/busy port — the failure only shows up
-    // later as an 'error' event. Wait for open-or-error here so a busy port
-    // correctly falls through to the next data source instead of this one
-    // "winning" the chain while silently not connected.
-    const opened = await new Promise((resolve) => {
-      let settled = false;
-      this._port = new SerialPort({ path: matchPath, baudRate: BAUD_RATE }, (err) => {
-        if (settled) return;
-        settled = true;
-        if (err) {
-          console.warn('[arduino] ERROR: failed to open serial port:', err.message);
-          resolve(false);
-        } else {
-          console.log('[arduino] connected');
-          resolve(true);
-        }
+    log.info(`Leonardo detected on ${path}`);
+    const port = new this._SerialPort({ path, baudRate: BAUD_RATE, autoOpen: false });
+    port.open((err) => {
+      if (err) {
+        // Most common cause: Arduino IDE Serial Monitor still holding the port.
+        log.error(`failed to open ${path}: ${err.message} (close the Arduino IDE Serial Monitor)`);
+        this._warnedMissing = false;
+        this._scheduleRetry();
+        return;
+      }
+      this._port = port;
+      this._warnedMissing = false;
+      // Leonardo CDC only transmits to the host while DTR is asserted;
+      // set it explicitly rather than relying on OS defaults (Windows).
+      port.set({ dtr: true }, () => {});
+      log.info('connected');
+
+      port.pipe(new this._ReadlineParser({ delimiter: '\n' })).on('data', (line) => this._onLine(line.trim()));
+      port.on('error', (e) => log.error(e.message));
+      port.on('close', () => {
+        this._port = null;
+        if (this._stopped) return;
+        log.warn('disconnected — will reconnect automatically');
+        this._scheduleRetry();
       });
     });
-
-    if (!opened) {
-      return false;
-    }
-
-    this._port.on('error', (err) => console.warn('[arduino] ERROR:', err.message));
-    this._port.on('close', () => console.log('[arduino] disconnected'));
-
-    const parser = this._port.pipe(new ReadlineParser({ delimiter: '\n' }));
-    parser.on('data', (line) => this._handleLine(line.trim()));
-
-    return true;
   }
 
-  _handleLine(line) {
-    switch (line) {
-      case 'START_PRESS':
-        console.log('[arduino] BLACK BUTTON → OPEN SIMULATION');
-        this._simulationOpen = true;
-        this._emitState();
-        console.log('[arduino] emitting SIMULATION_OPEN');
-        break;
-      case 'START_RELEASE':
-        console.log('[arduino] BLACK BUTTON → RELEASED');
-        break;
-      case 'STOP_PRESS':
-        console.log('[arduino] RED BUTTON → CLOSE SIMULATION');
-        this._simulationOpen = false;
-        this._emitState();
-        console.log('[arduino] emitting SIMULATION_CLOSE');
-        break;
-      case 'STOP_RELEASE':
-        console.log('[arduino] RED BUTTON → RELEASED');
-        break;
-      default:
-        if (line) console.warn('[arduino] unrecognized line, ignoring:', line);
+  _onLine(line) {
+    if (!line) return;
+    if (line.startsWith('READY')) {
+      log.info(`firmware: ${line}`);
+      return;
     }
+    const entry = LINES[line];
+    if (!entry) {
+      log.warn('unrecognized line, ignoring:', line);
+      return;
+    }
+    const [button, pressed] = entry;
+    log.info(`${button.toUpperCase()} BUTTON ${pressed ? 'PRESSED' : 'released'}`);
+    this.emit('button', { button, pressed });
   }
 
-  _emitState() {
-    // Only ever emits simulation_open — lever_speed/door_open/metrics
-    // belong to the lever source and data-source.js merges this in
-    // alongside it. Never put lever_speed here.
-    this.emit('update', { simulation_open: this._simulationOpen });
+  _scheduleRetry() {
+    if (this._stopped || this._retryTimer) return;
+    this._retryTimer = setTimeout(() => {
+      this._retryTimer = null;
+      this._tryOpen();
+    }, RECONNECT_MS);
   }
 
   stop() {
+    this._stopped = true;
+    clearTimeout(this._retryTimer);
     if (this._port && this._port.isOpen) {
       try { this._port.close(); } catch (e) {}
     }

@@ -1,120 +1,102 @@
 'use strict';
 /**
- * WebSocket JSON gateway for the Vande Bharat cockpit experience.
+ * WebSocket gateway for the Vande Bharat cockpit experience — transport only.
  *
- * OUTBOUND: broadcasts a small JSON object (see README.md) to every
- * connected client whenever the underlying data source has an update.
- * Clients are the Unity apps: main screen (video/camera speed), metrics
- * screens, and the iPad app.
+ *   hardware / keyboard (lib/data-source.js) --commands--> Controller
+ *   iPad / Unity clients  (WebSocket JSON)   --commands--> Controller
+ *   Controller --full state snapshot--> every connected client
  *
- * INBOUND: accepts a door-open trigger message from the Unity iPad app
- * (button click) and forwards it to the "External" system via
- * lib/door-controller.js (currently a stub — see that file). Also accepts
- * simulation_open / simulation_close triggers from any Unity client (e.g.
- * a keypress on one screen) so a single press can open/close the
- * simulation for every connected screen at once, same field the Arduino
- * pushbuttons drive.
- *
- * Run: npm install && npm start
- * Config: set PORT env var to change the listening port (default 8080).
+ * See README.md for the message contract. Run: node src/server.js
+ * (Windows production: scripts\windows\start-server.bat).
  */
 
 const WebSocket = require('ws');
-const { createDataSource } = require('./lib/data-source');
-const { triggerDoorOpen } = require('./lib/door-controller');
+const { createInputs } = require('./lib/data-source');
+const { Controller } = require('./lib/controller');
+const { AppLauncher } = require('./lib/app-launcher');
+const { HornPlayer } = require('./lib/horn-player');
+const { createLogger } = require('./lib/log');
+
+const log = createLogger('server');
 
 const PORT = process.env.PORT ? Number(process.env.PORT) : 8080;
+const PING_INTERVAL_MS = 10000;
 
-const wss = new WebSocket.Server({ port: PORT }, () => {
-  console.log(`[server] WebSocket gateway listening on ws://0.0.0.0:${PORT}`);
+const hornPlayer = new HornPlayer();
+const controller = new Controller({ appLauncher: new AppLauncher(), hornPlayer });
+const inputs = createInputs();
+
+const wss = new WebSocket.Server({ port: PORT, perMessageDeflate: false }, () => {
+  log.info(`WebSocket gateway listening on ws://0.0.0.0:${PORT}`);
 });
 
-let latestState = {
-  lever_speed: 0,
-  door_open: false,
-  metrics: {},
-  source: 'startup'
-};
-let dataSource = null;
+wss.on('error', (err) => {
+  log.error(`cannot listen on port ${PORT}: ${err.message} (is another server already running?)`);
+  process.exit(1);
+});
 
-function broadcast(state) {
+controller.on('broadcast', (state) => {
   const payload = JSON.stringify(state);
-  wss.clients.forEach((client) => {
-    if (client.readyState === WebSocket.OPEN) {
-      client.send(payload);
-    }
-  });
-}
+  for (const client of wss.clients) {
+    if (client.readyState === WebSocket.OPEN) client.send(payload);
+  }
+});
 
-function handleInboundMessage(raw) {
+function handleClientMessage(raw, from) {
   let msg;
   try {
     msg = JSON.parse(raw);
   } catch (err) {
-    console.warn('[server] received non-JSON message, ignoring:', raw.toString().slice(0, 200));
+    log.warn(`non-JSON message from ${from}, ignoring: ${raw.toString().slice(0, 200)}`);
     return;
   }
-
-  if (msg && msg.type === 'door_open') {
-    console.log('[server] door_open trigger received from a client');
-    triggerDoorOpen();
-
-    // Briefly reflect the trigger in the broadcast state so any connected
-    // screen can show visual confirmation, then reset. This is a simple
-    // pulse, not a tracked/persistent door state (the External system is
-    // the source of truth for actual door position, once integrated).
-    broadcast({ ...latestState, door_open: true });
-    setTimeout(() => broadcast({ ...latestState, door_open: false }), 1000);
+  if (!msg || typeof msg.type !== 'string') {
+    log.warn(`message without a "type" from ${from}, ignoring: ${raw.toString().slice(0, 200)}`);
     return;
   }
-
-  if (msg && msg.type === 'simulation_open') {
-    console.log('[server] simulation_open trigger received from a client');
-    if (dataSource) dataSource.setSimulationOpen(true);
-    return;
-  }
-
-  if (msg && msg.type === 'simulation_close') {
-    console.log('[server] simulation_close trigger received from a client');
-    if (dataSource) dataSource.setSimulationOpen(false);
-    return;
-  }
-
-  console.warn('[server] received message with unrecognized shape, ignoring:', msg);
+  controller.handleCommand({ ...msg, source: from });
 }
 
 wss.on('connection', (ws, req) => {
-  const addr = req.socket.remoteAddress;
-  console.log(`[server] client connected: ${addr} (${wss.clients.size} total)`);
+  const from = `ws:${req.socket.remoteAddress}:${req.socket.remotePort}`;
+  ws.isAlive = true;
+  log.info(`client connected: ${from} (${wss.clients.size} total)`);
 
-  // Send current state immediately so a new client doesn't wait for the
-  // next tick to see anything.
-  ws.send(JSON.stringify(latestState));
+  // New/reconnecting clients get the current state immediately.
+  ws.send(JSON.stringify(controller.snapshot()));
 
-  ws.on('message', (raw) => handleInboundMessage(raw));
-
-  ws.on('close', () => {
-    console.log(`[server] client disconnected: ${addr} (${wss.clients.size} total)`);
-  });
-
-  ws.on('error', (err) => {
-    console.error(`[server] client error (${addr}):`, err.message);
-  });
+  ws.on('pong', () => { ws.isAlive = true; });
+  ws.on('message', (raw) => handleClientMessage(raw, from));
+  ws.on('close', () => log.info(`client disconnected: ${from} (${wss.clients.size} total)`));
+  ws.on('error', (err) => log.warn(`client error ${from}: ${err.message}`));
 });
 
-createDataSource().then((ds) => {
-  dataSource = ds;
-  ds.on('update', (state) => {
-    if (state.lever_speed !== latestState.lever_speed) {
-      console.log(`[server] lever_speed changed: ${latestState.lever_speed} -> ${state.lever_speed}`);
+// Drop connections that stopped answering (crashed app, pulled cable) so we
+// never keep writing into dead sockets.
+const pinger = setInterval(() => {
+  for (const ws of wss.clients) {
+    if (!ws.isAlive) {
+      ws.terminate();
+      continue;
     }
-    latestState = state;
-    broadcast(state);
-  });
-});
+    ws.isAlive = false;
+    ws.ping();
+  }
+}, PING_INTERVAL_MS);
 
-process.on('SIGINT', () => {
-  console.log('\n[server] shutting down...');
-  if (dataSource) dataSource.stop();
+inputs.on('command', (cmd) => controller.handleCommand(cmd));
+inputs.on('lever', (lever) => controller.setLever(lever));
+
+hornPlayer.start();
+inputs.start();
+
+function shutdown() {
+  log.info('shutting down...');
+  clearInterval(pinger);
+  inputs.stop();
+  hornPlayer.stop();
   wss.close(() => process.exit(0));
-});
+  setTimeout(() => process.exit(0), 1000).unref();
+}
+process.on('SIGINT', shutdown);
+process.on('SIGTERM', shutdown);

@@ -1,149 +1,151 @@
 # Train Simulator Gateway
 
-A small WebSocket server that broadcasts live JSON — lever/speed, door,
-data-metric, and simulation open/close values — for the Vande Bharat
-cockpit experience. Built for the Unity apps (main screen, metrics screens,
-iPad) to connect to.
+WebSocket gateway for the Vande Bharat cockpit experience. It reads the
+physical controls (Thrustmaster lever, Arduino buttons, keyboard fallback),
+accepts commands from the iPad / Unity apps, and broadcasts one shared state
+to every connected screen.
 
-**Status: early boilerplate.** Two independent physical controls feed this
-right now, neither of which is final exhibit hardware: a test lever (a
-Thrustmaster TCA throttle quadrant) driving `lever_speed`, and an Arduino
-Leonardo with two industrial pushbuttons (BLACK/RED) driving
-`simulation_open`. The JSON shape below is what you should build against —
-it will not change when either piece of hardware is swapped out on the
-backend.
+```
+TCA lever ─┐                                  ┌─> Unity screens (5-6 apps)
+Arduino  ──┤                                  │
+Keyboard ──┼─> commands ─> Controller ─> state ┼─> iPad controller app
+iPad/Unity ┘   (same names from every input)  └─> (every client, same JSON)
+```
 
 ## Running it
 
-```bash
-npm install
-npm start
-```
+**Windows exhibit PC (production):** edit `APPS_DIR` at the top of
+`scripts\windows\start-server.bat`, then put a shortcut to it in the Startup
+folder (`Win+R` → `shell:startup`). It starts the gateway with the PC and
+restarts it automatically if it ever crashes. First time on a new PC, run
+`npm install` in this folder once (native modules must be built for Windows —
+don't copy `node_modules` from a Mac).
 
-You'll see something like:
+**Dev / manual:** `npm install` then `npm start`.
 
-```
-[server] WebSocket gateway listening on ws://0.0.0.0:8080
-[data-source] Thrustmaster TCA quadrant found — running with REAL lever hardware (gated: both levers must reach full push together).
-[arduino] initializing...
-[arduino] Leonardo detected
-[arduino] connected
-```
+**Test the hardware without Unity:** `npm run hardware:test` — prints every
+lever/button/key press and what it triggers (app launching is dry-run here,
+the horn really plays).
 
-If no lever hardware is plugged in (e.g. you're building on your own
-machine), it automatically falls back to a simulated smooth oscillating
-`lever_speed` instead of failing — you'll see `SIMULATED mode` in the log,
-and still get live, changing JSON to build against. If the Arduino isn't
-plugged in, you'll see `[arduino] not detected — hardware controls
-unavailable` and `simulation_open` just stays `false`. Either way,
-connecting a client works identically.
+**Unit tests:** `npm test`.
 
-## Connecting
+Close the Arduino IDE Serial Monitor before starting — it locks the port.
 
-Connect a WebSocket client to:
+## Physical controls
 
-```
-ws://<the machine running this>:8080
-```
+| Control | Command | Keyboard fallback |
+|---|---|---|
+| Arduino **BLACK** button (D9) | `launch_apps` — start all Unity apps | `L` |
+| Thrustmaster lever, **both** levers pushed fully forward | `play` — all videos play | `P` |
+| Arduino **RED** button (D8) | `pause` — all videos pause | `S` |
+| Arduino **HORN** button (D7) | `horn` — horn sound on the PC speakers | `H` |
+| — | `restart_apps` — stop and relaunch all Unity apps | `R` |
 
-(Port is configurable via the `PORT` environment variable.)
+Keyboard fallback works two ways: **Ctrl+Shift+key from anywhere** (even
+while a fullscreen Unity app has focus), or the **plain key** in the gateway's
+own console window. Ctrl+Shift is required for the global version so normal
+typing on the PC can't fire commands.
 
-Every update (roughly every 100ms currently), the server pushes one JSON
-message to every connected client:
+The lever triggers `play` on the push only — letting it go does nothing, so
+nobody has to hold it for the whole ride. RED pauses; push the lever (or `P`)
+again to resume.
+
+The TCA lever and Arduino are hot-plug: unplug/replug any time, no restart
+needed. While one isn't connected, its keyboard keys still work.
+
+## Launching the Unity apps (BLACK button)
+
+`scripts\windows\launch-all.bat` finds every `Start.bat` under `APPS_DIR`
+(recursively — e.g. `OutsideViewDisplay_v0.1_2\OutsideViewDisplay\Start.bat`)
+and runs each one from its own folder. Apps that are already running are
+skipped, so pressing BLACK again only starts whatever is missing (e.g. after a
+crash) — never duplicates. `stop-all.bat` kills the `.exe` next to each
+`Start.bat` (used by `restart_apps`). Launching resets `playing` to `false`
+so freshly started apps come up paused.
+
+## WebSocket contract
+
+Connect to `ws://localhost:8080` from apps on the exhibit PC, or
+`ws://<exhibit PC LAN IP>:8080` from the iPad (allow port 8080 through the
+Windows Firewall). Port is configurable with the `PORT` env var.
+
+### Server → clients
+
+**Every message is a complete state snapshot**, sent only when something
+actually changes (plus immediately on connect). Nothing is sent while idle.
 
 ```json
 {
-  "lever_speed": 1,
-  "door_open": false,
-  "metrics": {
-    "speed_kmh": 84,
-    "distance_km": 12.3
-  },
+  "playing": false,
+  "simulation_open": false,
+  "lever_speed": 0,
   "source": "hid-tca",
-  "simulation_open": false
+  "door_open": false,
+  "lights_level": 1,
+  "volumes": {
+    "control_voice": 1,
+    "background_music": 1,
+    "ambient_sound": 1,
+    "narrator_voice": 1
+  },
+  "metrics": { "speed_kmh": 0, "distance_km": null },
+  "event": "",
+  "event_id": 0,
+  "event_value": 0
 }
 ```
 
-### Field reference
+| Field | Meaning |
+|---|---|
+| `playing` | **The only field that decides video playback.** `true` = play, `false` = pause. |
+| `simulation_open` | Old name for `playing`, always identical. Kept so older builds keep working — use `playing` in new code. |
+| `lever_speed` | `1` while both levers are fully pushed, else `0`. **Informational only — do not drive playback from it.** |
+| `source` | Which lever hardware is active (`hid-tca`, or `none`). Debug only. |
+| `door_open` | Door state set by the iPad. |
+| `lights_level` | Ambient light level, `0` (dim) – `1` (bright). |
+| `volumes.*` | Per-channel volume `0`–`1`. Each app applies the channels it plays. |
+| `metrics` | Placeholder for the metrics screens, TBD. |
+| `event` | One-shot event carried by this message only, `""` otherwise: `horn`, `seek`, `seek_relative`. |
+| `event_id` | Increments on every event — use it to never handle the same event twice. |
+| `event_value` | `seek`: absolute time in seconds. `seek_relative`: delta in seconds (±10). |
 
-| Field | Type | Meaning |
-|---|---|---|
-| `lever_speed` | `0` or `1` | All-or-nothing throttle gate, driven by the physical lever hardware (TCA quadrant / Flight Yoke stand-in / simulated). `1` only when both physical levers are fully pushed together, `0` otherwise. Use this to trigger the main screen's video play/enable — no gradual ramp needed, the source video already has that baked in. |
-| `door_open` | boolean | Door state. **Not finalized** — see "Known open questions" below. |
-| `metrics` | object | Data to show on the metrics screen. **Fields shown are placeholders, not confirmed** — see below. |
-| `source` | string | Debug info only — tells you whether `lever_speed` came from real test hardware, a stand-in signal, or the simulator. Ignore it in your UI; it won't be in the final production shape. |
-| `simulation_open` | boolean | Driven independently by two physical pushbuttons (separate from the lever). `true` after the BLACK button is pressed (session/experience should be active — BLACK is also what launches the Unity apps in the first place, via a startup script, before this even matters). `false` after the RED button is pressed (session should stop/close — e.g. stop the main screen video). How exactly this interacts with `lever_speed` on your end is up to you; we just broadcast the raw button state. |
+### Clients → server
 
-**`lever_speed` and `simulation_open` come from two completely independent physical controls** — a button press never changes `lever_speed`, and moving the lever never changes `simulation_open`.
-
-## Sending a simulation_open/close trigger (any Unity screen -> this server)
-
-`simulation_open` isn't only driven by the Arduino buttons — **any connected
-client can trigger it too**, and the trigger is broadcast to every other
-connected screen. This is for exactly the case where you want one keypress
-(e.g. "P") on any one of your Unity apps to open/start every screen at
-once, instead of clicking into and triggering each one individually:
-
-```json
-{ "type": "simulation_open" }
-```
-```json
-{ "type": "simulation_close" }
-```
-
-Send either as a WebSocket text message on the same connection you're
-already receiving updates on. Like the Arduino buttons, this is a latched
-state, not a pulse — `simulation_open` stays `true`/`false` until something
-(the Arduino, or another trigger like this) changes it again. Whichever
-source (Arduino or a client trigger) wrote last is what every subsequent
-broadcast reflects.
-
-## Sending the door-open trigger (iPad -> this server)
-
-When the iPad's door button is clicked, send this JSON as a WebSocket text
-message on the SAME connection you're already receiving updates on:
+Send as a text message on the same connection. Any client can send any
+command; every connected screen gets the resulting state.
 
 ```json
+{ "type": "play" }
+{ "type": "pause" }
+{ "type": "launch_apps" }
+{ "type": "restart_apps" }
+{ "type": "horn" }
 { "type": "door_open" }
+{ "type": "door_close" }
+{ "type": "set_lights", "level": 0.6 }
+{ "type": "set_volume", "channel": "background_music", "level": 0.4 }
+{ "type": "seek", "time": 755.0 }
+{ "type": "seek_relative", "delta": 10 }
 ```
 
-No other fields needed — it's a one-shot trigger, not a state you set. This
-server forwards it on to the external door-control system (hardware side —
-still being integrated on our end) and briefly reflects `door_open: true` in
-the broadcast JSON for ~1 second so any screen watching can show visual
-confirmation, then resets it to `false`. That reflected value is just a
-confirmation pulse, not the authoritative door state.
+`simulation_open` / `simulation_close` are still accepted as old names for
+`play` / `pause`. Invalid commands are rejected and logged, never crash the
+server. Repeating a command is harmless (e.g. `play` while already playing
+sends nothing).
 
-### Minimal client example (C#, conceptual)
+## Config (env vars, set in `start-server.bat`)
 
-```csharp
-// Using any WebSocket client library (e.g. NativeWebSocket, websocket-sharp)
-var ws = new WebSocket("ws://<host>:8080");
-ws.OnMessage += (bytes) => {
-    var json = Encoding.UTF8.GetString(bytes);
-    var state = JsonUtility.FromJson<GatewayState>(json);
-    // state.lever_speed, state.door_open, state.metrics.speed_kmh, ...
-};
-ws.Connect();
+| Var | Default | |
+|---|---|---|
+| `APPS_DIR` | — (required for launching) | Folder containing all Unity app folders |
+| `PORT` | `8080` | WebSocket port |
+| `HORN_FILE` | `assets/horn.wav` | Horn sound, PCM `.wav` (placeholder included — replace with a real recording) |
+| `ARDUINO_PORT` | auto-detect | Force a serial port, e.g. `COM5` |
+| `LEVER_SOURCE` | `tca` | `yoke` / `simulated` for dev only |
 
-// On the iPad's door button click:
-ws.SendText("{\"type\":\"door_open\"}");
-```
+## Not built yet (stubs ready)
 
-(Exact serialization approach — `JsonUtility` vs Newtonsoft — is up to you;
-the server just sends plain JSON text frames.)
-
-## Status of open questions
-
-1. **`metrics` fields** — confirmed OK to keep as placeholder for now;
-   fields will be added/removed as needed once the client decides between
-   dummy vs. real captured data.
-2. **`door_open` direction** — confirmed: Unity (iPad) sends the trigger to
-   this server, see "Sending the door-open trigger" above. On our side, the
-   forward-to-hardware leg is still a stub (`src/lib/door-controller.js`)
-   since the external door system isn't finalized yet — this doesn't block
-   you, the WebSocket message you send is already handled correctly.
-3. **Update rate / deltas vs absolute** — confirmed fine as-is (~100ms,
-   absolute values).
-
-
+- Door hardware: `src/lib/door-controller.js`
+- Lighting hardware: `src/lib/lights-controller.js`
+- Playback position for the iPad timeline (needs the main screen app to report its video time)
+- A second button on the Thrustmaster for the horn — its button bytes haven't been mapped from raw HID data yet

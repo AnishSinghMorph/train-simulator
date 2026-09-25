@@ -1,111 +1,96 @@
 'use strict';
 /**
- * SINGLE POINT OF CHANGE for swapping data sources. Everything else in this
- * project (server.js, the WebSocket clients, the Unity app) depends only on
- * the shape of the object this module emits via 'update' — never on how
- * that object was produced. See CLAUDE.md Section 4/5/7 for the full plan.
+ * SINGLE POINT OF CHANGE for hardware. Turns every physical input into the
+ * same named commands the WebSocket clients (iPad, Unity) send, so the
+ * controller never cares where a command came from:
  *
- * Two INDEPENDENT, simultaneous inputs, not alternatives in a fallback
- * chain:
+ *   TCA lever rising edge (both levers full push) -> 'play'
+ *   Arduino BLACK press                            -> 'launch_apps'
+ *   Arduino RED press                              -> 'pause'
+ *   Arduino HORN press                             -> 'horn'
+ *   Keyboard (keyboard-input.js)                   -> same commands, fallback
  *
- *   1. The lever/acceleration source — drives lever_speed exclusively.
- *      Fallback chain, most real hardware first: Thrustmaster TCA quadrant
- *      (hid-tca-source.js) -> Flight Yoke stand-in (hid-yoke-source.js) ->
- *      simulated oscillating signal (simulated-source.js), which is always
- *      available so this service never fails to produce something a client
- *      can connect to and develop against.
+ * Emits:
+ *   'command' { type, source }       — act on this
+ *   'lever'   { lever_speed, source } — informational lever state (0|1)
  *
- *   2. The Arduino Leonardo pushbuttons (arduino-source.js) — completely
- *      separate real-world control (open/close the simulation), NOT the
- *      lever. It contributes only `simulation_open` and runs in parallel
- *      with whichever lever source is active, if it's plugged in.
- *
- * These used to be modeled as one priority chain (Arduino first, lever
- * sources after) which was wrong: it let the Arduino silently take over
- * lever_speed whenever it was connected, fighting with the real lever.
- * Keep them separate — the lever source and the Arduino source must never
- * both try to own the same field.
- *
- * Later: when final exhibit hardware exists, either edit the winning lever
- * source file in place, or write a new one and swap which gets tried first
- * below. The emitted object's shape should stay the same so nothing
- * downstream breaks.
+ * Lever source is chosen explicitly via LEVER_SOURCE (default 'tca'):
+ *   tca       — Thrustmaster TCA quadrant, hot-plug aware (production)
+ *   yoke      — old Flight Yoke test rig (dev only)
+ *   simulated — oscillating fake lever (dev only). NOT a default fallback
+ *               anymore: its fake full-push would trigger 'play' on its own
+ *               every ~30s, and it competed with real triggers on screens.
+ * With no lever hardware, lever_speed stays 0 and keyboard 'P' is the
+ * fallback.
  */
 
 const EventEmitter = require('events');
 const { ArduinoSource } = require('./arduino-source');
 const { HidTcaSource } = require('./hid-tca-source');
-const { HidYokeSource } = require('./hid-yoke-source');
-const { SimulatedSource } = require('./simulated-source');
+const { KeyboardInput } = require('./keyboard-input');
 
-class CombinedSource extends EventEmitter {
-  constructor(leverSource, arduinoSource) {
-    super();
-    this._leverSource = leverSource;
-    this._arduinoSource = arduinoSource;
-    this._leverState = { lever_speed: 0, door_open: false, metrics: {}, source: 'startup' };
-    this._simulationOpen = false;
+const BUTTON_COMMANDS = {
+  black: 'launch_apps',
+  red: 'pause',
+  horn: 'horn'
+};
 
-    this._leverSource.on('update', (state) => {
-      this._leverState = state;
-      this._emit();
-    });
-
-    if (this._arduinoSource) {
-      this._arduinoSource.on('update', (state) => {
-        this._simulationOpen = state.simulation_open;
-        this._emit();
-      });
+// Adapts the legacy yoke/simulated sources (continuous 0..1 'update'
+// events) to the gated 'lever' interface the TCA source already speaks.
+function legacyLever(name, Source) {
+  const lever = new EventEmitter();
+  lever.name = name;
+  const inner = new Source();
+  let last = 0;
+  inner.on('update', (state) => {
+    const gated = state.lever_speed >= 0.99 ? 1 : 0;
+    if (gated !== last) {
+      last = gated;
+      lever.emit('lever', { lever_speed: gated });
     }
-  }
+  });
+  lever.start = () => inner.start();
+  lever.stop = () => inner.stop();
+  return lever;
+}
 
-  // Lets server.js set simulation_open directly (e.g. a Unity client
-  // pressing "P" and sending a WebSocket trigger) using the exact same
-  // internal field the Arduino writes to — so whichever wrote last is
-  // what every subsequent emit (including plain lever ticks) reflects.
-  // Setting it here instead of overwriting broadcast JSON in server.js
-  // avoids a race where the next lever update would silently revert it.
-  setSimulationOpen(value) {
-    this._simulationOpen = value;
-    this._emit();
-  }
-
-  _emit() {
-    this.emit('update', {
-      ...this._leverState,
-      simulation_open: this._simulationOpen
-    });
-  }
-
-  stop() {
-    this._leverSource.stop();
-    if (this._arduinoSource) this._arduinoSource.stop();
+function createLeverSource(kind) {
+  switch (kind) {
+    case 'yoke': return legacyLever('hid-yoke-standin', require('./hid-yoke-source').HidYokeSource);
+    case 'simulated': return legacyLever('simulated', require('./simulated-source').SimulatedSource);
+    default: return new HidTcaSource();
   }
 }
 
-async function createLeverSource() {
-  const tca = new HidTcaSource();
-  if (tca.start()) {
-    return tca;
-  }
-
-  const hid = new HidYokeSource();
-  if (hid.start()) {
-    return hid;
-  }
-
-  const sim = new SimulatedSource();
-  sim.start();
-  return sim;
-}
-
-async function createDataSource() {
-  const leverSource = await createLeverSource();
-
+function createInputs() {
+  const inputs = new EventEmitter();
+  const lever = createLeverSource(process.env.LEVER_SOURCE || 'tca');
   const arduino = new ArduinoSource();
-  const arduinoOk = await arduino.start();
+  const keyboard = new KeyboardInput();
 
-  return new CombinedSource(leverSource, arduinoOk ? arduino : null);
+  lever.on('lever', ({ lever_speed, connected }) => {
+    inputs.emit('lever', { lever_speed, source: connected === false ? 'none' : lever.name });
+    if (lever_speed === 1) inputs.emit('command', { type: 'play', source: 'lever' });
+  });
+
+  arduino.on('button', ({ button, pressed }) => {
+    const type = BUTTON_COMMANDS[button];
+    if (pressed && type) inputs.emit('command', { type, source: `arduino:${button}` });
+  });
+
+  keyboard.on('command', (cmd) => inputs.emit('command', cmd));
+
+  inputs.start = () => {
+    lever.start();
+    arduino.start();
+    keyboard.start();
+  };
+  inputs.stop = () => {
+    lever.stop();
+    arduino.stop();
+    keyboard.stop();
+  };
+  return inputs;
 }
 
-module.exports = { createDataSource };
+module.exports = { createInputs };
