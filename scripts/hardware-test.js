@@ -22,14 +22,14 @@ const log = createLogger('hardware:test');
 const ASSETS = path.join(__dirname, '..', 'assets');
 
 const hornPlayer = new SoundPlayer('horn', process.env.HORN_FILE || path.join(ASSETS, 'horn.wav'));
-const ambientPlayer = new SoundPlayer('ambient', process.env.AMBIENT_FILE || path.join(ASSETS, 'ambient.wav'), {
-  volume: process.env.AMBIENT_VOLUME ? Number(process.env.AMBIENT_VOLUME) : 0.3
-});
+const AMBIENT_VOLUME = process.env.AMBIENT_VOLUME ? Number(process.env.AMBIENT_VOLUME) : 0.3;
+const ambientPlayer = new SoundPlayer('ambient', process.env.AMBIENT_FILE || path.join(ASSETS, 'ambient.wav'), { volume: AMBIENT_VOLUME });
 const controller = new Controller({
   appLauncher: new AppLauncher({ dryRun: true }),
   hornPlayer,
   ambientPlayer,
-  waitForScreens: async () => false
+  waitForScreens: async () => false,
+  ambientVolume: AMBIENT_VOLUME
 });
 const inputs = createInputs();
 

@@ -8,12 +8,13 @@ function setup({ screensUp = true } = {}) {
   const ambientPlayer = {
     isLooping: false,
     loop() { this.isLooping = true; calls.ambientLoop++; },
-    stop() { this.isLooping = false; calls.ambientStop++; }
+    stop() { this.isLooping = false; calls.ambientStop++; },
+    setVolume(v) { calls.ambientVolume = v; }
   };
   const controller = new Controller({
     appLauncher: {
-      launch: async () => { calls.launch++; return 7; },
-      restart: async () => { calls.restart++; return 7; }
+      launch: async () => { calls.launch++; return { screens: 7, launched: !calls.alreadyOpen }; },
+      restart: async () => { calls.restart++; return { screens: 7, launched: true }; }
     },
     hornPlayer: { play: () => calls.horn++ },
     ambientPlayer,
@@ -24,19 +25,22 @@ function setup({ screensUp = true } = {}) {
   return { controller, sent, calls };
 }
 
-// S, E, P as the operator does -> 'ready', so accelerate is allowed. Clears the log.
-function toEngine({ controller, sent }) {
+const settle = () => new Promise((r) => setImmediate(r));
+
+// S, E, P as the operator does -> 'ready', so A / lever are allowed. Clears the log.
+async function toEngine({ controller, sent }) {
   controller.handleCommand({ type: 'launch_apps' });
+  await settle(); // S changes step once the launcher reports back
   controller.handleCommand({ type: 'start_engine' });
   controller.handleCommand({ type: 'play' });
   controller._lastRun.play = 0; // tests press keys faster than a human
   sent.length = 0;
 }
 
-test('play/pause broadcast only on real change, simulation_open and lever_speed mirror playing', () => {
+test('play/pause broadcast only on real change, simulation_open and lever_speed mirror playing', async () => {
   const t = setup();
   const { controller, sent } = t;
-  toEngine(t);
+  await toEngine(t);
   controller.handleCommand({ type: 'accelerate', source: 'test' });
   controller.handleCommand({ type: 'accelerate', source: 'test' }); // repeat: no-op
   assert.strictEqual(sent.length, 1);
@@ -50,27 +54,27 @@ test('play/pause broadcast only on real change, simulation_open and lever_speed 
   assert.strictEqual(sent[1].lever_speed, 0);
 });
 
-test('legacy simulation_open / simulation_close commands still work', () => {
+test('legacy simulation_open / simulation_close commands still work', async () => {
   const t = setup();
   const { controller, sent } = t;
-  toEngine(t);
+  await toEngine(t);
   controller.handleCommand({ type: 'simulation_open' });
   assert.strictEqual(sent.at(-1).playing, true);
   controller.handleCommand({ type: 'simulation_close' });
   assert.strictEqual(sent.at(-1).playing, false);
 });
 
-test('letting go of the lever never stops the videos', () => {
+test('letting go of the lever never stops the videos', async () => {
   const t = setup();
   const { controller, sent } = t;
-  toEngine(t);
+  await toEngine(t);
   controller.handleCommand({ type: 'accelerate' });
   controller.setLever({ lever_speed: 0, source: 'hid-tca' });
   assert.strictEqual(sent.at(-1).playing, true);
   assert.strictEqual(sent.at(-1).lever_speed, 1);
 });
 
-test('steps go in order: S -> E -> P -> P again / A, out-of-order presses are ignored', () => {
+test('steps go in order: S -> E -> P -> A / lever, out-of-order presses are ignored', async () => {
   const { controller, sent } = setup();
   const press = (type) => { controller._lastRun.play = 0; controller.handleCommand({ type }); };
   press('play');           // P before S
@@ -78,62 +82,88 @@ test('steps go in order: S -> E -> P -> P again / A, out-of-order presses are ig
   press('accelerate');     // A before S
   assert.strictEqual(sent.length, 0);
   press('launch_apps');
+  await settle();
   assert.strictEqual(sent.at(-1).stage, 'setup');
   press('play');           // P before E
-  press('accelerate');     // A before P
+  press('accelerate');     // A before E
   assert.strictEqual(sent.at(-1).stage, 'setup');
   press('start_engine');
+  assert.strictEqual(sent.at(-1).stage, 'engine');
+  press('accelerate');     // lever pushed too early (before P): ignored
   assert.strictEqual(sent.at(-1).stage, 'engine');
   press('start_engine');   // E twice: no-op
   press('play');
   assert.strictEqual(sent.at(-1).stage, 'ready');
-  assert.strictEqual(sent.at(-1).playing, false); // side display only, not everything yet
-  press('play');           // P again = accelerate
+  assert.strictEqual(sent.at(-1).playing, false); // HUD up but paused
+  press('accelerate');
   assert.strictEqual(sent.at(-1).stage, 'running');
   assert.strictEqual(sent.at(-1).playing, true);
   press('pause');
-  press('accelerate');     // A resumes after pause
+  press('play');           // P resumes after pause
   assert.strictEqual(sent.at(-1).playing, true);
 });
 
-test('A (or the lever) starts everything straight from the ready step', () => {
+test('P again (instead of A) also starts the HUD from the ready step', async () => {
   const t = setup();
   const { controller, sent } = t;
-  toEngine(t);
-  controller.handleCommand({ type: 'accelerate', source: 'lever' });
+  await toEngine(t);
+  controller.handleCommand({ type: 'play' });
   assert.strictEqual(sent.at(-1).stage, 'running');
   assert.strictEqual(sent.at(-1).playing, true);
 });
 
-test('a quick double-tap on P does not skip past the ready step', () => {
+test('a quick double-tap on P does not skip past the ready step', async () => {
   const { controller, sent } = setup();
   controller.handleCommand({ type: 'launch_apps' });
+  await settle();
   controller.handleCommand({ type: 'start_engine' });
   controller.handleCommand({ type: 'play' });
   controller.handleCommand({ type: 'play' }); // within 800ms
   assert.strictEqual(sent.at(-1).stage, 'ready');
 });
 
-test('restart goes back to the setup step, paused', () => {
+test('restart goes back to the setup step, paused', async () => {
   const t = setup();
   const { controller, sent } = t;
-  toEngine(t);
+  await toEngine(t);
   controller.handleCommand({ type: 'accelerate' });
   controller.handleCommand({ type: 'restart_apps' });
   assert.strictEqual(sent.at(-1).stage, 'setup');
   assert.strictEqual(sent.at(-1).playing, false);
 });
 
-test('launch resets playing so fresh apps start paused, and is debounced', () => {
+test('launch resets playing so fresh apps start paused, and is debounced', async () => {
   const t = setup();
   const { controller, sent, calls } = t;
-  toEngine(t);
+  await toEngine(t);
   controller.handleCommand({ type: 'accelerate' });
   controller._lastRun.launch_apps = 0; // skip the double-press cooldown from toEngine
   controller.handleCommand({ type: 'launch_apps' });
   controller.handleCommand({ type: 'launch_apps' }); // double press
+  await settle();
   assert.strictEqual(calls.launch, 2);
   assert.strictEqual(sent.at(-1).playing, false);
+});
+
+test('S while the screens are already open keeps the current step (R starts over)', async () => {
+  const t = setup();
+  const { controller, sent, calls } = t;
+  await toEngine(t);
+  controller.handleCommand({ type: 'accelerate' });
+  calls.alreadyOpen = true;
+  controller._lastRun.launch_apps = 0;
+  controller.handleCommand({ type: 'launch_apps' }); // accidental S mid-show
+  await settle();
+  assert.strictEqual(sent.at(-1).stage, 'running');
+  assert.strictEqual(sent.at(-1).playing, true);
+});
+
+test('S after a server restart (screens still open) moves from idle to setup', async () => {
+  const { controller, sent, calls } = setup();
+  calls.alreadyOpen = true;
+  controller.handleCommand({ type: 'launch_apps' });
+  await settle();
+  assert.strictEqual(sent.at(-1).stage, 'setup');
 });
 
 test('horn plays once per press, carries a one-shot event, full snapshot included', () => {
@@ -172,8 +202,6 @@ test('valid lights/volume/door/seek commands update state or emit events', () =>
   assert.strictEqual(sent.at(-1).event_value, -10);
 });
 
-const settle = () => new Promise((r) => setImmediate(r));
-
 test('ambient loop starts only after the launched screens have loaded, once', async () => {
   const { controller, calls } = setup();
   controller.handleCommand({ type: 'launch_apps' });
@@ -208,4 +236,34 @@ test('a launch while the ambient is already looping does not restart the track',
   controller.handleCommand({ type: 'launch_apps' });
   await settle();
   assert.strictEqual(calls.ambientLoop, 1);
+});
+
+test('every message carries the recognition tag and ambient state', () => {
+  const { controller } = setup();
+  const s = controller.snapshot();
+  assert.strictEqual(s.server, 'train-sim-gateway');
+  assert.strictEqual(s.ambient_on, true);
+  assert.strictEqual(s.volumes.ambient_sound, 0.3);
+});
+
+test('CH03 ambient slider sets the ambient player volume live', () => {
+  const { controller, sent, calls } = setup();
+  controller.handleCommand({ type: 'set_volume', channel: 'ambient_sound', level: 0.6 });
+  assert.strictEqual(calls.ambientVolume, 0.6);
+  assert.strictEqual(sent.at(-1).volumes.ambient_sound, 0.6);
+});
+
+test('ambient off mutes, on restores the slider level; bad payload rejected', () => {
+  const { controller, sent, calls } = setup();
+  controller.handleCommand({ type: 'set_volume', channel: 'ambient_sound', level: 0.5 });
+  controller.handleCommand({ type: 'set_ambient', on: false });
+  assert.strictEqual(calls.ambientVolume, 0);
+  assert.strictEqual(sent.at(-1).ambient_on, false);
+  controller.handleCommand({ type: 'set_volume', channel: 'ambient_sound', level: 0.7 }); // while off: stays muted
+  assert.strictEqual(calls.ambientVolume, 0);
+  controller.handleCommand({ type: 'set_ambient', on: true });
+  assert.strictEqual(calls.ambientVolume, 0.7);
+  const n = sent.length;
+  controller.handleCommand({ type: 'set_ambient', on: 'yes' });
+  assert.strictEqual(sent.length, n);
 });

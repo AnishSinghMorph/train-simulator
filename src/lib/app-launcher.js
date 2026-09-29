@@ -111,19 +111,25 @@ class AppLauncher {
     return stdout.toLowerCase().includes(this._exe.toLowerCase());
   }
 
-  // Resolves to how many screens should now be up (0 if none could start),
-  // so the caller can wait for them to connect.
+  // Resolves to { screens, launched }: how many screens should now be up
+  // (0 if none could start) and whether they were started just now (false
+  // when they were already open).
   async launch() {
     const screens = this._findScreens();
     const simulate = this._dryRun || process.platform !== 'win32';
 
     if (screens.length === 0) {
       log.error(`no Start_*.bat files found in ${this._appsDir} (or its QuestRail subfolder) — set APPS_DIR`);
-      return 0;
+      return { screens: 0, launched: false };
     }
     if (!simulate && await this._isRunning()) {
       log.info(`${this._exe} already running — not launching again (use restart to relaunch all screens)`);
-      return screens.length;
+      return { screens: screens.length, launched: false };
+    }
+
+    if (process.env.USE_LAUNCHALL === '1') {
+      await this._runLaunchAll(screens[0].cwd, simulate);
+      return { screens: screens.length, launched: true };
     }
 
     for (const s of screens) {
@@ -140,7 +146,30 @@ class AppLauncher {
         log.error(`${s.name} failed to start: ${err.message}`);
       }
     }
-    return screens.length;
+    return { screens: screens.length, launched: true };
+  }
+
+  // Optional (USE_LAUNCHALL=1): run the Unity build's own LaunchAll.bat
+  // instead of starting each screen directly. Note: on the offline exhibit PC
+  // this route showed a SmartScreen "Run?" prompt for every file.
+  _runLaunchAll(dir, simulate) {
+    const bat = path.join(dir, 'LaunchAll.bat');
+    if (simulate) {
+      log.info(`[${this._dryRun ? 'dry-run' : 'not Windows'}] would run ${bat}`);
+      return Promise.resolve();
+    }
+    if (!fs.existsSync(bat)) {
+      log.error(`LaunchAll.bat not found in ${dir}`);
+      return Promise.resolve();
+    }
+    log.info(`running ${bat}`);
+    return new Promise((resolve) => {
+      // cmd /s /c with the whole command wrapped in one extra pair of quotes
+      // is the only reliable way to hand cmd a quoted path with spaces.
+      const child = spawn('cmd.exe', ['/d', '/s', '/c', `""${bat}""`], { windowsVerbatimArguments: true, windowsHide: true });
+      child.on('error', (err) => { log.error(`failed to run LaunchAll.bat: ${err.message}`); resolve(); });
+      child.on('exit', () => { log.info('LaunchAll.bat finished'); resolve(); });
+    });
   }
 
   async stop() {

@@ -28,8 +28,8 @@ const log = createLogger('keyboard');
 const KEY_COMMANDS = {
   S: 'launch_apps',   // start setup (BLACK button)
   E: 'start_engine',  // start engine
-  P: 'play',          // start (and P again = accelerate)
-  A: 'accelerate',    // start everything (lever full push)
+  P: 'play',          // side continues, HUD up (paused); P again = accelerate
+  A: 'accelerate',    // HUD plays (lever full push)
   Space: 'pause',     // pause (RED button)
   H: 'horn',          // horn button
   R: 'restart_apps'

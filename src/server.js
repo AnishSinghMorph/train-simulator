@@ -61,7 +61,7 @@ function waitForScreens(count) {
   });
 }
 
-const controller = new Controller({ appLauncher: new AppLauncher(), hornPlayer, ambientPlayer, waitForScreens });
+const controller = new Controller({ appLauncher: new AppLauncher(), hornPlayer, ambientPlayer, waitForScreens, ambientVolume: AMBIENT_VOLUME });
 
 controller.on('broadcast', (state) => {
   const payload = JSON.stringify(state);

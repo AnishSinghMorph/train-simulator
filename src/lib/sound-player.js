@@ -13,49 +13,26 @@
  *
  * Files must be PCM WAV (System.Media.SoundPlayer can't play MP3).
  *
- * `volume` (0..1): SoundPlayer has no volume control, so a quieter copy of
- * the WAV is written to the temp folder once at startup and played instead.
+ * Volume (0..1) is live: on Windows the player process sets its own session
+ * volume (winmm waveOutSetVolume) without restarting the sound; on macOS the
+ * next play / loop iteration uses `afplay -v`.
  */
 
 const { spawn } = require('child_process');
 const fs = require('fs');
-const os = require('os');
 const path = require('path');
 const { createLogger } = require('./log');
 
+const clamp01 = (v) => Math.max(0, Math.min(1, Number(v) || 0));
+
 const PS1 = path.join(__dirname, '..', '..', 'scripts', 'windows', 'sound-player.ps1');
 const RESTART_MS = 3000;
-
-// Returns a copy of a 16-bit PCM WAV with every sample scaled by `volume`,
-// or null if the file isn't 16-bit PCM.
-function scaleWav(buf, volume) {
-  if (buf.toString('ascii', 0, 4) !== 'RIFF' || buf.toString('ascii', 8, 12) !== 'WAVE') return null;
-  let pos = 12;
-  let pcm16 = false;
-  while (pos + 8 <= buf.length) {
-    const id = buf.toString('ascii', pos, pos + 4);
-    const size = buf.readUInt32LE(pos + 4);
-    const body = pos + 8;
-    if (id === 'fmt ') pcm16 = buf.readUInt16LE(body) === 1 && buf.readUInt16LE(body + 14) === 16;
-    if (id === 'data') {
-      if (!pcm16) return null;
-      const out = Buffer.from(buf);
-      const end = Math.min(body + size, buf.length) - 1;
-      for (let i = body; i < end; i += 2) {
-        out.writeInt16LE(Math.round(buf.readInt16LE(i) * volume), i);
-      }
-      return out;
-    }
-    pos = body + size + (size % 2);
-  }
-  return null;
-}
 
 class SoundPlayer {
   constructor(name, file, { volume = 1 } = {}) {
     this._log = createLogger(name);
     this._name = name;
-    this._volume = volume;
+    this._volume = clamp01(volume);
     this._file = file;
     this._proc = null;
     this._ready = false;
@@ -70,22 +47,17 @@ class SoundPlayer {
       this._disabled = true;
       return;
     }
-    if (this._volume < 1) this._useQuieterCopy();
     if (process.platform === 'win32') this._startWindowsPlayer();
     else this._log.info(`ready (${process.platform}: afplay) — ${this._file}`);
   }
 
-  _useQuieterCopy() {
-    const v = Math.max(0, Math.min(1, this._volume));
-    const scaled = scaleWav(fs.readFileSync(this._file), v);
-    if (!scaled) {
-      this._log.warn('volume setting needs a 16-bit PCM WAV — playing at full volume');
-      return;
-    }
-    const out = path.join(os.tmpdir(), `train-sim-${this._name}-${Math.round(v * 100)}.wav`);
-    fs.writeFileSync(out, scaled);
-    this._file = out;
-    this._log.info(`volume ${Math.round(v * 100)}%`);
+  get volume() {
+    return this._volume;
+  }
+
+  setVolume(v) {
+    this._volume = clamp01(v);
+    if (process.platform === 'win32' && this._ready) this._proc.stdin.write(`volume ${this._volume}\n`);
   }
 
   play() {
@@ -117,7 +89,7 @@ class SoundPlayer {
 
   _sendMac(cmd) {
     if (cmd === 'play') {
-      spawn('afplay', [this._file], { stdio: 'ignore' }).on('error', (err) => this._log.error(err.message));
+      spawn('afplay', ['-v', String(this._volume), this._file], { stdio: 'ignore' }).on('error', (err) => this._log.error(err.message));
       return;
     }
     if (this._macLoop) this._macLoop.kill();
@@ -125,7 +97,7 @@ class SoundPlayer {
     if (cmd === 'loop') {
       const again = () => {
         if (!this.isLooping) return;
-        this._macLoop = spawn('afplay', [this._file], { stdio: 'ignore' });
+        this._macLoop = spawn('afplay', ['-v', String(this._volume), this._file], { stdio: 'ignore' });
         this._macLoop.on('exit', (code, signal) => { if (!signal) again(); });
       };
       again();
@@ -140,8 +112,11 @@ class SoundPlayer {
     });
     this._proc = proc;
     proc.stdout.on('data', (buf) => {
-      if (!buf.toString().includes('READY')) return;
+      const text = buf.toString();
+      if (text.includes('VOLUME_FAIL')) this._log.warn(`could not set volume live (${text.trim()})`);
+      if (!text.includes('READY')) return;
       this._ready = true;
+      proc.stdin.write(`volume ${this._volume}\n`);
       this._log.info(`ready (pre-loaded) — ${this._file}`);
       const next = this._pending || (this.isLooping ? 'loop' : null);
       this._pending = null;
@@ -166,4 +141,4 @@ class SoundPlayer {
   }
 }
 
-module.exports = { SoundPlayer, scaleWav };
+module.exports = { SoundPlayer };

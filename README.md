@@ -36,9 +36,9 @@ Close the Arduino IDE Serial Monitor before starting — it locks the port.
 | Control | Command | Keyboard fallback |
 |---|---|---|
 | Arduino **BLACK** button (D9) | `launch_apps` — start setup: open all Unity apps | `S` |
-| — | `start_engine` — start engine | `E` |
-| Tablet Start Train | `play` — start; pressed again = accelerate | `P` |
-| Thrustmaster lever, **both** levers pushed fully forward | `accelerate` — everything plays | `A` |
+| — | `start_engine` — start engine (train + side videos) | `E` |
+| Tablet Start Train | `play` — side continues, HUD up (paused); again = accelerate | `P` |
+| Thrustmaster lever, **both** levers pushed fully forward | `accelerate` — dashboard HUD plays | `A` |
 | Arduino **RED** button (D8) | `pause` — all videos pause | `Space` |
 | Arduino **HORN** button (D7) | `horn` — horn sound on the PC speakers | `H` |
 | — | `restart_apps` — stop and relaunch all Unity apps | `R` |
@@ -47,10 +47,14 @@ Steps only work in order, and every message carries the current one as `stage`:
 
 | Key | `stage` | Screens |
 |---|---|---|
-| **S** | `setup` | Dashboards: Start The Experience (Default). Side: screensaver. Main: train video, paused |
-| **E** | `engine` | Side: plays SideDisplay to 36.14s, pauses. Dashboards: HUD loaded, paused |
-| **P** | `ready` | Side: continues to ~48s ("start acceleration"), pauses |
-| **P again / A / lever** | `running` | Everything plays: side resumes, main train, dashboard HUD (`playing` = true) |
+| **S** | `setup` | Dashboards: Start The Experience (Default). Side: screensaver. Main: paused |
+| **E** | `engine` | Main: train video starts (train waits at the station). Side: switches to the side video, plays to **36.14s**, pauses |
+| **P** | `ready` | Side: continues from 36.14s to **48.25s** ("push the lever" prompt), pauses. Dashboards: switch to the HUD, paused |
+| **A / lever** (or P again) — at the 48.25s prompt | `running` | Side resumes. Dashboards: HUD plays (`playing` = true), in sync with the train moving off |
+
+Video timings (side pauses at 36.14s and 48.25s, the train moving off) are baked into
+the videos and synced in Unity; the server only says which step it is. The
+lever / A is ignored before P, so the HUD can't be started too early.
 
 Keys pressed at the wrong step are ignored (the server window says which key
 comes first). **Space** pauses; **P** or **A** resumes. **R** restarts and goes
@@ -87,7 +91,8 @@ screens come up paused.
 
 After a launch (BLACK / Start Setup / `S`) or a restart, the server waits until
 every screen it started has loaded and connected, then loops the ambient track
-on the PC speakers at **30% volume** (`AMBIENT_VOLUME`, 0–1) until the next
+on the PC speakers at **30% volume** (`AMBIENT_VOLUME`, 0–1; changed live from the
+tablet's CH 03 slider via `set_volume` `ambient_sound`, muted with `set_ambient`) until the next
 restart. When every screen on the PC has closed, the ambient stops too. If a screen never connects, the
 ambient starts anyway after 30 seconds. It plays in its own player, so the
 horn can sound over it.
@@ -132,12 +137,14 @@ actually changes (plus immediately on connect). Nothing is sent while idle.
 | Field | Meaning |
 |---|---|
 | `playing` | **The only field that decides video playback.** `true` = play, `false` = pause. |
-| `stage` | Where the experience is: `idle`, `setup` (S), `engine` (E), `ready` (P), `running` (P again / A / lever). Drives what each screen shows. |
+| `stage` | Where the experience is: `idle`, `setup` (S), `engine` (E), `ready` (P), `running` (A / lever / P again). Drives what each screen shows. |
 | `simulation_open` | Old name for `playing`, always identical. Kept so older builds keep working — use `playing` in new code. |
 | `lever_speed` | Also always equal to `playing` (`1` = train running), so a screen reading it can't disagree. |
 | `source` | Which lever hardware is active (`hid-tca`, or `none`). Debug only. |
 | `door_open` | Door state set by the iPad. |
 | `lights_level` | Ambient light level, `0` (dim) – `1` (bright). |
+| `server` | Always `"train-sim-gateway"` — how the tablet app recognises this server when it scans the network. |
+| `ambient_on` | Whether the server's ambient loop is on (off = muted, continues instantly when switched back on). |
 | `volumes.*` | Per-channel volume `0`–`1`. Each app applies the channels it plays. |
 | `metrics` | Placeholder for the metrics screens, TBD. |
 | `event` | One-shot event carried by this message only, `""` otherwise: `horn`, `seek`, `seek_relative`. |
@@ -161,6 +168,8 @@ command; every connected screen gets the resulting state.
 { "type": "door_close" }
 { "type": "set_lights", "level": 0.6 }
 { "type": "set_volume", "channel": "background_music", "level": 0.4 }
+{ "type": "set_volume", "channel": "ambient_sound", "level": 0.4 }
+{ "type": "set_ambient", "on": false }
 { "type": "seek", "time": 755.0 }
 { "type": "seek_relative", "delta": 10 }
 ```
@@ -182,6 +191,7 @@ sends nothing).
 | Var | Default | |
 |---|---|---|
 | `APPS_DIR` | `%USERPROFILE%\AppData\LocalLow\GetMorph\QuestRail` | Folder with the Unity build's `Start_*.bat` files |
+| `USE_LAUNCHALL` | off | `1` = S runs the Unity build's `LaunchAll.bat` (same folder) instead of starting each screen directly. That route showed a SmartScreen prompt per file on the offline PC |
 | `APP_EXE` | `QuestRail.exe` | Process checked before launching and killed on restart |
 | `PORT` | `8080` | WebSocket port |
 | `AMBIENT_VOLUME` | `0.3` | Ambient loudness, `0`–`1` |

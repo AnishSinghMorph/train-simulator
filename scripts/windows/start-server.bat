@@ -3,6 +3,9 @@ rem ======================= CONFIG =======================
 rem All optional - defaults shown. Uncomment and edit only if needed.
 rem Folder with the Unity build's Start_*.bat files (BLACK button starts them):
 rem set "APPS_DIR=%USERPROFILE%\AppData\LocalLow\GetMorph\QuestRail"
+rem Uncomment to have S run the Unity build's LaunchAll.bat instead of
+rem starting each screen directly (may bring back SmartScreen "Run?" prompts):
+rem set "USE_LAUNCHALL=1"
 rem set "PORT=8080"
 rem set "HORN_FILE=%~dp0..\..\assets\horn.wav"
 rem set "ARDUINO_PORT=COM5"

@@ -24,20 +24,15 @@ test('returns null when there is no start line', () => {
   assert.strictEqual(parseStartBat('@echo off\r\necho hi\r\n'), null);
 });
 
-const { scaleWav } = require('../src/lib/sound-player');
+const { SoundPlayer } = require('../src/lib/sound-player');
 
-test('scaleWav scales 16-bit PCM samples and refuses other formats', () => {
-  const samples = [10000, -20000, 32767];
-  const data = Buffer.alloc(samples.length * 2);
-  samples.forEach((v, i) => data.writeInt16LE(v, i * 2));
-  const fmt = Buffer.alloc(16);
-  fmt.writeUInt16LE(1, 0); fmt.writeUInt16LE(1, 2); fmt.writeUInt32LE(44100, 4);
-  fmt.writeUInt32LE(88200, 8); fmt.writeUInt16LE(2, 12); fmt.writeUInt16LE(16, 14);
-  const chunk = (id, body) => { const h = Buffer.alloc(8); h.write(id, 0); h.writeUInt32LE(body.length, 4); return Buffer.concat([h, body]); };
-  const riff = Buffer.concat([Buffer.from('WAVE'), chunk('fmt ', fmt), chunk('data', data)]);
-  const head = Buffer.alloc(8); head.write('RIFF', 0); head.writeUInt32LE(riff.length, 4);
-  const out = scaleWav(Buffer.concat([head, riff]), 0.3);
-  const dataStart = out.indexOf('data') + 8;
-  assert.deepStrictEqual([0, 1, 2].map((i) => out.readInt16LE(dataStart + i * 2)), [3000, -6000, 9830]);
-  assert.strictEqual(scaleWav(Buffer.from('not a wav file at all'), 0.3), null);
+test('SoundPlayer keeps a live volume, clamped to 0..1, starting from the option', () => {
+  const p = new SoundPlayer('ambient', '/nonexistent.wav', { volume: 0.3 });
+  assert.strictEqual(p.volume, 0.3);
+  p.setVolume(0.8);
+  assert.strictEqual(p.volume, 0.8);
+  p.setVolume(1.7);
+  assert.strictEqual(p.volume, 1);
+  p.setVolume(-2);
+  assert.strictEqual(p.volume, 0);
 });
