@@ -4,7 +4,7 @@
  * same named commands the WebSocket clients (iPad, Unity) send, so the
  * controller never cares where a command came from:
  *
- *   TCA lever rising edge (both levers full push) -> 'play'
+ *   TCA lever rising edge (both levers full push) -> 'accelerate'
  *   Arduino BLACK press                            -> 'launch_apps'
  *   Arduino RED press                              -> 'pause'
  *   Arduino HORN press                             -> 'horn'
@@ -70,7 +70,7 @@ function createInputs() {
 
   lever.on('lever', ({ lever_speed, connected }) => {
     inputs.emit('lever', { lever_speed, source: connected === false ? 'none' : lever.name });
-    if (lever_speed === 1) inputs.emit('command', { type: 'play', source: 'lever' });
+    if (lever_speed === 1) inputs.emit('command', { type: 'accelerate', source: 'lever' });
   });
 
   arduino.on('button', ({ button, pressed }) => {

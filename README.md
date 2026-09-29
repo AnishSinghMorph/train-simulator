@@ -6,7 +6,7 @@ accepts commands from the iPad / Unity apps, and broadcasts one shared state
 to every connected screen.
 
 ```
-TCA lever ─┐                                  ┌─> Unity screens (5-6 apps)
+TCA lever ─┐                                  ┌─> Unity screens (7 apps) 
 Arduino  ──┤                                  │
 Keyboard ──┼─> commands ─> Controller ─> state ┼─> iPad controller app
 iPad/Unity ┘   (same names from every input)  └─> (every client, same JSON)
@@ -14,8 +14,8 @@ iPad/Unity ┘   (same names from every input)  └─> (every client, same JSON
 
 ## Running it
 
-**Windows exhibit PC (production):** edit `APPS_DIR` at the top of
-`scripts\windows\start-server.bat`, then put a shortcut to it in the Startup
+**Windows exhibit PC (production):** put a shortcut to
+`scripts\windows\start-server.bat` in the Startup
 folder (`Win+R` → `shell:startup`). It starts the gateway with the PC and
 restarts it automatically if it ever crashes. First time on a new PC, run
 `npm install` in this folder once (native modules must be built for Windows —
@@ -35,33 +35,66 @@ Close the Arduino IDE Serial Monitor before starting — it locks the port.
 
 | Control | Command | Keyboard fallback |
 |---|---|---|
-| Arduino **BLACK** button (D9) | `launch_apps` — start all Unity apps | `L` |
-| Thrustmaster lever, **both** levers pushed fully forward | `play` — all videos play | `P` |
-| Arduino **RED** button (D8) | `pause` — all videos pause | `S` |
+| Arduino **BLACK** button (D9) | `launch_apps` — start setup: open all Unity apps | `S` |
+| — | `start_engine` — start engine | `E` |
+| Tablet Start Train | `play` — start; pressed again = accelerate | `P` |
+| Thrustmaster lever, **both** levers pushed fully forward | `accelerate` — everything plays | `A` |
+| Arduino **RED** button (D8) | `pause` — all videos pause | `Space` |
 | Arduino **HORN** button (D7) | `horn` — horn sound on the PC speakers | `H` |
 | — | `restart_apps` — stop and relaunch all Unity apps | `R` |
 
-Keyboard fallback works two ways: **Ctrl+Shift+key from anywhere** (even
-while a fullscreen Unity app has focus), or the **plain key** in the gateway's
-own console window. Ctrl+Shift is required for the global version so normal
-typing on the PC can't fire commands.
+Steps only work in order, and every message carries the current one as `stage`:
 
-The lever triggers `play` on the push only — letting it go does nothing, so
-nobody has to hold it for the whole ride. RED pauses; push the lever (or `P`)
-again to resume.
+| Key | `stage` | Screens |
+|---|---|---|
+| **S** | `setup` | Dashboards: Start The Experience (Default). Side: screensaver. Main: train video, paused |
+| **E** | `engine` | Side: plays SideDisplay to 36.14s, pauses. Dashboards: HUD loaded, paused |
+| **P** | `ready` | Side: continues to ~48s ("start acceleration"), pauses |
+| **P again / A / lever** | `running` | Everything plays: side resumes, main train, dashboard HUD (`playing` = true) |
+
+Keys pressed at the wrong step are ignored (the server window says which key
+comes first). **Space** pauses; **P** or **A** resumes. **R** restarts and goes
+back to `setup`.
+
+Keyboard fallback: on the Windows PC the **single letters work from any
+window**, even while a fullscreen Unity screen has focus (Ctrl/Alt/Win + letter
+is ignored; holding a key counts once). Careful: typing on that PC while the
+server runs triggers them — e.g. `R` in Notepad restarts all screens. On a dev
+Mac the letters only work in the server's own console window.
 
 The TCA lever and Arduino are hot-plug: unplug/replug any time, no restart
 needed. While one isn't connected, its keyboard keys still work.
 
 ## Launching the Unity apps (BLACK button)
 
-`scripts\windows\launch-all.bat` finds every `Start.bat` under `APPS_DIR`
-(recursively — e.g. `OutsideViewDisplay_v0.1_2\OutsideViewDisplay\Start.bat`)
-and runs each one from its own folder. Apps that are already running are
-skipped, so pressing BLACK again only starts whatever is missing (e.g. after a
-crash) — never duplicates. `stop-all.bat` kills the `.exe` next to each
-`Start.bat` (used by `restart_apps`). Launching resets `playing` to `false`
-so freshly started apps come up paused.
+Every screen is the same `QuestRail.exe` with a different monitor/scene, one
+`Start_*.bat` per screen (`Start_D1`–`D5`, `Start_Side`, `Start_Main`) in
+`APPS_DIR` (or its `QuestRail` subfolder). BLACK reads each `Start_*.bat` and
+starts `QuestRail.exe` **directly** with that file's arguments, all at once.
+To move a screen to another monitor, keep editing `TARGET_MONITOR` in its
+`Start_*.bat` as before.
+
+Node doesn't go through `LaunchAll.bat` / `start` on purpose: on the offline
+PC, Windows SmartScreen popped up "can't be reached — Run?" for every file
+launched that way. `LaunchAll.bat` still works for launching by hand.
+
+If `QuestRail.exe` is already running, BLACK does nothing, so a second press
+never opens duplicate screens; use `restart_apps` (`R`) to close all of them
+and launch again. Launching resets `playing` to `false` so freshly started
+screens come up paused.
+
+## Ambient sound
+
+After a launch (BLACK / Start Setup / `S`) or a restart, the server waits until
+every screen it started has loaded and connected, then loops the ambient track
+on the PC speakers at **30% volume** (`AMBIENT_VOLUME`, 0–1) until the next
+restart. When every screen on the PC has closed, the ambient stops too. If a screen never connects, the
+ambient starts anyway after 30 seconds. It plays in its own player, so the
+horn can sound over it.
+
+The track is `assets/ambient.wav` and the horn is `assets/horn.wav` (PCM WAV —
+MP3 won't play). Both are third-party audio, so they're **gitignored**: copy
+them onto the exhibit PC by hand (pendrive).
 
 ## WebSocket contract
 
@@ -76,6 +109,7 @@ actually changes (plus immediately on connect). Nothing is sent while idle.
 
 ```json
 {
+  "stage": "idle",
   "playing": false,
   "simulation_open": false,
   "lever_speed": 0,
@@ -98,8 +132,9 @@ actually changes (plus immediately on connect). Nothing is sent while idle.
 | Field | Meaning |
 |---|---|
 | `playing` | **The only field that decides video playback.** `true` = play, `false` = pause. |
+| `stage` | Where the experience is: `idle`, `setup` (S), `engine` (E), `ready` (P), `running` (P again / A / lever). Drives what each screen shows. |
 | `simulation_open` | Old name for `playing`, always identical. Kept so older builds keep working — use `playing` in new code. |
-| `lever_speed` | `1` while both levers are fully pushed, else `0`. **Informational only — do not drive playback from it.** |
+| `lever_speed` | Also always equal to `playing` (`1` = train running), so a screen reading it can't disagree. |
 | `source` | Which lever hardware is active (`hid-tca`, or `none`). Debug only. |
 | `door_open` | Door state set by the iPad. |
 | `lights_level` | Ambient light level, `0` (dim) – `1` (bright). |
@@ -118,6 +153,8 @@ command; every connected screen gets the resulting state.
 { "type": "play" }
 { "type": "pause" }
 { "type": "launch_apps" }
+{ "type": "start_engine" }
+{ "type": "accelerate" }
 { "type": "restart_apps" }
 { "type": "horn" }
 { "type": "door_open" }
@@ -128,6 +165,13 @@ command; every connected screen gets the resulting state.
 { "type": "seek_relative", "delta": 10 }
 ```
 
+`seek` / `seek_relative` use **absolute seconds**, not 0–1.
+
+The Unity **screens on the exhibit PC can't play or pause** — `play`, `pause`,
+`simulation_open` and `simulation_close` from apps on the PC itself are
+ignored (logged as `ignored ... from a screen`). Playback is controlled only by
+the keyboard, lever, buttons and the tablet.
+
 `simulation_open` / `simulation_close` are still accepted as old names for
 `play` / `pause`. Invalid commands are rejected and logged, never crash the
 server. Repeating a command is harmless (e.g. `play` while already playing
@@ -137,9 +181,13 @@ sends nothing).
 
 | Var | Default | |
 |---|---|---|
-| `APPS_DIR` | — (required for launching) | Folder containing all Unity app folders |
+| `APPS_DIR` | `%USERPROFILE%\AppData\LocalLow\GetMorph\QuestRail` | Folder with the Unity build's `Start_*.bat` files |
+| `APP_EXE` | `QuestRail.exe` | Process checked before launching and killed on restart |
 | `PORT` | `8080` | WebSocket port |
-| `HORN_FILE` | `assets/horn.wav` | Horn sound, PCM `.wav` (placeholder included — replace with a real recording) |
+| `AMBIENT_VOLUME` | `0.3` | Ambient loudness, `0`–`1` |
+| `ALLOW_LOCAL_PLAYBACK` | off | Set to `1` only if a controller app (not a screen) runs on the exhibit PC — otherwise play/pause from apps on the PC itself is ignored |
+| `AMBIENT_FILE` | `assets/ambient.wav` | Ambient loop, PCM `.wav` (not in git — copy it over) |
+| `HORN_FILE` | `assets/horn.wav` | Horn sound, PCM `.wav` (not in git — copy it over) |
 | `ARDUINO_PORT` | auto-detect | Force a serial port, e.g. `COM5` |
 | `LEVER_SOURCE` | `tca` | `yoke` / `simulated` for dev only |
 
@@ -147,5 +195,5 @@ sends nothing).
 
 - Door hardware: `src/lib/door-controller.js`
 - Lighting hardware: `src/lib/lights-controller.js`
-- Playback position for the iPad timeline (needs the main screen app to report its video time)
+- Playback position for the tablet timeline (needs the main screen app to report its video time)
 - A second button on the Thrustmaster for the horn — its button bytes haven't been mapped from raw HID data yet

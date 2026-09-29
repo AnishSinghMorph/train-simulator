@@ -13,8 +13,14 @@
  * field as false and, say, pause the video by accident.
  *
  * `playing` is THE single source of truth for video playback. The old
- * `simulation_open` is kept as an exact alias so builds that already read
- * it keep working; `lever_speed` is informational only.
+ * `simulation_open` AND `lever_speed` are both sent as exact copies of it
+ * (lever_speed 1 = train running), so a screen reading any of the three
+ * can never disagree with the others.
+ *
+ * `stage` walks the experience in order:
+ *   idle -> setup (S) -> engine (E) -> ready (P) -> running (P again / A / lever)
+ * Only `running` plays everything (playing = true). Each key only works at
+ * its step; after a pause, P or A resumes. Restart goes back to setup.
  */
 
 const EventEmitter = require('events');
@@ -30,25 +36,31 @@ const VOLUME_CHANNELS = ['control_voice', 'background_music', 'ambient_sound', '
 // twice (e.g. Unity's own P key + the global hotkey, or a double-tap) runs once.
 const COOLDOWN_MS = {
   launch_apps: 5000,
+  play: 800, // a quick double-tap on P must not skip straight past "ready"
   restart_apps: 15000,
   horn: 300
 };
 
 const ALIASES = {
-  simulation_open: 'play',
+  simulation_open: 'accelerate',
   simulation_close: 'pause'
 };
 
 const isLevel = (v) => typeof v === 'number' && Number.isFinite(v) && v >= 0 && v <= 1;
 
 class Controller extends EventEmitter {
-  constructor({ appLauncher, hornPlayer }) {
+  // waitForScreens(n) resolves (true/false) once n screens have connected or
+  // the wait times out — the server knows who's connected, the controller doesn't.
+  constructor({ appLauncher, hornPlayer, ambientPlayer, waitForScreens }) {
     super();
     this._apps = appLauncher;
     this._horn = hornPlayer;
+    this._ambient = ambientPlayer;
+    this._waitForScreens = waitForScreens;
     this._lastRun = {};
     this._eventId = 0;
     this._state = {
+      stage: 'idle',
       playing: false,
       lever_speed: 0,
       source: 'none',
@@ -61,9 +73,10 @@ class Controller extends EventEmitter {
   snapshot(event = '', eventValue = 0) {
     const s = this._state;
     return {
+      stage: s.stage,
       playing: s.playing,
       simulation_open: s.playing,
-      lever_speed: s.lever_speed,
+      lever_speed: s.playing ? 1 : 0,
       source: s.source,
       door_open: s.door_open,
       lights_level: s.lights_level,
@@ -94,8 +107,30 @@ class Controller extends EventEmitter {
     }
 
     switch (type) {
-      case 'play':
-        if (this._update({ playing: true })) log.info(`PLAY (from ${from})`);
+      case 'play': {
+        const stage = this._state.stage;
+        if (stage === 'engine') {
+          this._update({ stage: 'ready' });
+          log.info(`START (from ${from}) — side display continues to the acceleration prompt; P again or A starts everything`);
+          return;
+        }
+        if (stage === 'ready' || stage === 'running') return this._accelerate(from);
+        log.warn(`PLAY from ${from} ignored — press ${stage === 'idle' ? 'S (start setup)' : 'E (start engine)'} first (current step: ${stage})`);
+        return;
+      }
+      case 'accelerate':
+        if (this._state.stage === 'ready' || this._state.stage === 'running') return this._accelerate(from);
+        log.warn(`ACCELERATE from ${from} ignored — press P first (current step: ${this._state.stage})`);
+        return;
+      case 'start_engine':
+        if (this._state.stage !== 'setup') {
+          log.warn(this._state.stage === 'idle'
+            ? `START ENGINE from ${from} ignored — press S (start setup) first`
+            : `START ENGINE from ${from} ignored — engine already started (current step: ${this._state.stage})`);
+          return;
+        }
+        this._update({ stage: 'engine' });
+        log.info(`START ENGINE (from ${from})`);
         return;
       case 'pause':
         if (this._update({ playing: false })) log.info(`PAUSE (from ${from})`);
@@ -108,13 +143,14 @@ class Controller extends EventEmitter {
       case 'launch_apps':
         log.info(`LAUNCH APPS (from ${from})`);
         // Freshly started apps must come up paused, not inherit a stale "playing".
-        this._update({ playing: false });
-        this._apps.launch();
+        this._update({ playing: false, stage: 'setup' });
+        this._startAmbientWhenLoaded(this._apps.launch());
         return;
       case 'restart_apps':
         log.info(`RESTART APPS (from ${from})`);
-        this._update({ playing: false });
-        this._apps.restart();
+        this._update({ playing: false, stage: 'setup' });
+        this._ambient.stop();
+        this._startAmbientWhenLoaded(this._apps.restart());
         return;
       case 'door_open':
         log.info(`DOOR OPEN (from ${from})`);
@@ -149,6 +185,24 @@ class Controller extends EventEmitter {
       default:
         this._reject(cmd, from, 'unknown command');
     }
+  }
+
+  _accelerate(from) {
+    if (this._update({ playing: true, stage: 'running' })) log.info(`ACCELERATE — everything plays (from ${from})`);
+  }
+
+  // The ambient loop starts once every screen that was launched has loaded
+  // and connected (or after the wait times out, so one stuck screen can't
+  // keep the room silent). Already looping = leave it alone.
+  async _startAmbientWhenLoaded(launching) {
+    const screens = await launching;
+    if (!screens || this._ambient.isLooping) return;
+    const allUp = await this._waitForScreens(screens);
+    if (this._ambient.isLooping) return;
+    log.info(allUp
+      ? `all ${screens} screens loaded — starting ambient sound`
+      : `not all ${screens} screens connected in time — starting ambient sound anyway`);
+    this._ambient.loop();
   }
 
   _reject(cmd, from, why) {

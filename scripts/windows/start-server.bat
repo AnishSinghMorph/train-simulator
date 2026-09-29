@@ -1,8 +1,8 @@
 @echo off
 rem ======================= CONFIG =======================
-rem Folder containing all the Unity app folders (each with its own Start.bat).
-set "APPS_DIR=C:\Exhibit\Apps"
-rem Optional overrides (defaults shown):
+rem All optional - defaults shown. Uncomment and edit only if needed.
+rem Folder with the Unity build's Start_*.bat files (BLACK button starts them):
+rem set "APPS_DIR=%USERPROFILE%\AppData\LocalLow\GetMorph\QuestRail"
 rem set "PORT=8080"
 rem set "HORN_FILE=%~dp0..\..\assets\horn.wav"
 rem set "ARDUINO_PORT=COM5"

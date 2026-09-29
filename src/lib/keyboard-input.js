@@ -3,16 +3,17 @@
  * Keyboard fallback for every hardware control, so the exhibit can be run
  * with no lever/Arduino connected. Two independent paths, same key map:
  *
- *  1. GLOBAL hotkeys (Ctrl+Shift+<key>) via uiohook-napi — work no matter
- *     which window has focus, including fullscreen Unity apps. The
- *     Ctrl+Shift chord is deliberate: a global hook sees ALL typing on the
- *     PC, so plain letters would fire commands while someone edits a file.
- *     uiohook-napi is an optionalDependency; if it's missing or fails to
- *     start (e.g. macOS without Accessibility permission) we log it and
- *     carry on with path 2.
+ *  1. GLOBAL single-letter keys via uiohook-napi (Windows only) — work no
+ *     matter which window has focus, including fullscreen Unity apps.
+ *     Single letters by request: note a global hook sees ALL typing on the
+ *     PC, so typing e.g. "R" anywhere (even in Notepad) restarts the screens.
+ *     Keys held with Ctrl/Alt/Win are ignored, so shortcuts like Ctrl+S don't
+ *     fire. uiohook-napi is an optionalDependency; if it's missing or fails
+ *     to start we log it and carry on with path 2.
  *
- *  2. CONSOLE keys (plain letter, no modifiers) when the Node server's own
- *     console window is focused. Only active when stdin is a real terminal.
+ *  2. CONSOLE keys when the Node server's own console window is focused —
+ *     only used when the global hook isn't running (dev Macs), otherwise
+ *     each press would arrive twice.
  *
  * Emits 'command' { type } with the same command names the WebSocket and
  * hardware inputs use. Duplicate commands arriving via several paths at
@@ -25,10 +26,12 @@ const { createLogger } = require('./log');
 const log = createLogger('keyboard');
 
 const KEY_COMMANDS = {
-  L: 'launch_apps', // BLACK button
-  P: 'play',        // lever full push
-  S: 'pause',       // RED button
-  H: 'horn',        // horn button
+  S: 'launch_apps',   // start setup (BLACK button)
+  E: 'start_engine',  // start engine
+  P: 'play',          // start (and P again = accelerate)
+  A: 'accelerate',    // start everything (lever full push)
+  Space: 'pause',     // pause (RED button)
+  H: 'horn',          // horn button
   R: 'restart_apps'
 };
 
@@ -37,10 +40,17 @@ class KeyboardInput extends EventEmitter {
     this._startGlobal();
     this._startConsole();
     const help = Object.entries(KEY_COMMANDS).map(([k, c]) => `${k}=${c}`).join('  ');
-    log.info(`keys: ${help}  (Ctrl+Shift+key anywhere, or plain key in this console)`);
+    log.info(`keys: ${help}  (${this._uIOhook ? 'work anywhere on this PC' : 'in this console window'})`);
   }
 
   _startGlobal() {
+    // Global hotkeys are for the Windows exhibit PC. On macOS the hook needs
+    // Input Monitoring permission and floods the log with "CGEventTap
+    // timeout!" without it, so dev Macs use the console keys instead.
+    if (process.platform !== 'win32') {
+      log.info('global hotkeys only run on Windows — use the plain keys in this console');
+      return;
+    }
     let hook;
     try {
       hook = require('uiohook-napi');
@@ -51,8 +61,14 @@ class KeyboardInput extends EventEmitter {
     const { uIOhook, UiohookKey } = hook;
     const byKeycode = new Map(Object.entries(KEY_COMMANDS).map(([k, c]) => [UiohookKey[k], c]));
 
+    // Holding a key makes Windows repeat keydown ~30x/s; only the first
+    // press counts until the key is released.
+    const held = new Set();
+    uIOhook.on('keyup', (e) => held.delete(e.keycode));
     uIOhook.on('keydown', (e) => {
-      if (!e.ctrlKey || !e.shiftKey || e.altKey || e.metaKey) return;
+      if (held.has(e.keycode)) return;
+      held.add(e.keycode);
+      if (e.ctrlKey || e.altKey || e.metaKey) return;
       const type = byKeycode.get(e.keycode);
       if (type) this._emit(type, 'global-hotkey');
     });
@@ -60,9 +76,7 @@ class KeyboardInput extends EventEmitter {
     try {
       uIOhook.start();
       this._uIOhook = uIOhook;
-      log.info(process.platform === 'darwin'
-        ? 'global hotkeys started (Ctrl+Shift+key) — macOS only delivers them if this terminal has Input Monitoring permission'
-        : 'global hotkeys active (Ctrl+Shift+key)');
+      log.info('global keys active — single letters work in any window');
     } catch (err) {
       log.warn('global hotkeys failed to start — console keys only:', err.message);
     }
@@ -78,7 +92,8 @@ class KeyboardInput extends EventEmitter {
         process.emit('SIGINT');
         return;
       }
-      const type = KEY_COMMANDS[key.toUpperCase()];
+      if (this._uIOhook) return; // global hook already sees this key
+      const type = KEY_COMMANDS[key === ' ' ? 'Space' : key.toUpperCase()];
       if (type) this._emit(type, 'console-key');
     });
     process.stdin.resume();
