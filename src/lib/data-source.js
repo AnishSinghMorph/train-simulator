@@ -6,7 +6,7 @@
  *
  *   TCA lever rising edge (both levers full push) -> 'accelerate'
  *   Arduino BLACK press                            -> 'launch_apps'
- *   Arduino RED press                              -> 'pause'
+ *   Arduino RED press                              -> 'horn' (for now)
  *   Arduino HORN press                             -> 'horn'
  *   Keyboard (keyboard-input.js)                   -> same commands, fallback
  *
@@ -31,7 +31,7 @@ const { KeyboardInput } = require('./keyboard-input');
 
 const BUTTON_COMMANDS = {
   black: 'launch_apps',
-  red: 'pause',
+  red: 'horn', // for now — was 'pause'
   horn: 'horn'
 };
 

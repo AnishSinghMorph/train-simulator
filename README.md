@@ -39,18 +39,38 @@ Close the Arduino IDE Serial Monitor before starting — it locks the port.
 | — | `start_engine` — start engine (train + side videos) | `E` |
 | Tablet Start Train | `play` — side continues, HUD up (paused); again = accelerate | `P` |
 | Thrustmaster lever, **both** levers pushed fully forward | `accelerate` — dashboard HUD plays | `A` |
-| Arduino **RED** button (D8) | `pause` — all videos pause | `Space` |
+| Arduino **RED** button (D8) | `horn` — horn sound (for now; was pause) | `H` |
+| Tablet PAUSE / round ⏸ | `pause` / `play` — pause while running, press again to resume | `Space` |
 | Arduino **HORN** button (D7) | `horn` — horn sound on the PC speakers | `H` |
 | — | `restart_apps` — stop and relaunch all Unity apps | `R` |
 
-Steps only work in order, and every message carries the current one as `stage`:
+Steps only work in order (the tablet's step buttons may jump), and every message carries the current one as `stage`:
 
-| Key | `stage` | Screens |
-|---|---|---|
-| **S** | `setup` | Dashboards: Start The Experience (Default). Side: screensaver. Main: paused |
-| **E** | `engine` | Main: train video starts (train waits at the station). Side: switches to the side video, plays to **36.14s**, pauses |
-| **P** | `ready` | Side: continues from 36.14s to **48.25s** ("push the lever" prompt), pauses. Dashboards: switch to the HUD, paused |
-| **A / lever** (or P again) — at the 48.25s prompt | `running` | Side resumes. Dashboards: HUD plays (`playing` = true), in sync with the train moving off |
+| # | Tablet button | PC key | `stage` | Main screen | Side display | Dashboards (HUD) |
+|---|---|---|---|---|---|---|
+| 1 | **OPEN APP** | `S` | `setup` | Paused | Screensaver | Black screen |
+| 2 | **START EXPERIENCE** | `E` | `engine` | Train video starts (train waits at the station) | Plays the side video to **36.14s**, pauses | Start Experience screensaver |
+| 3 | **START THE TRAIN** | `P` | `ready` | Train waiting | Continues to **48.25s**, pauses | Flickers to the **HUD video**, plays and stops by itself at **38.01s** |
+| 4 | **ACCELERATE** | `A` / lever / `P` again | `running` | Train moves off | Resumes | HUD video resumes (jumps to "moving" by itself). Node plays the train running sound |
+
+Other controls:
+
+| Tablet | PC key | Arduino | What it does |
+|---|---|---|---|
+| PAUSE / round ⏸ | `Space` | — | Pauses everything while running (`playing` = false); press again to resume |
+| HORN | `H` | RED or HORN button | Horn sound (played by Node) |
+| RESTART (hold 1 s) | `R` | — | Restarts all screens, back to step 1 |
+| Quest logo (hold 2 s) | — | — | Tablet connection settings (PC IP) |
+
+Playback timeline:
+
+- SideDisplay sends `{"type":"video_time","time":<videoPlayer.time>,"duration":<videoPlayer.length>}` once or twice a second — only the tablet receives it.
+- Dragging the bar or ⏮/⏭ on the tablet → every screen gets `event: "seek"` with `event_value` = the time to jump to (Node turns ⏮/⏭ into an absolute time). Set `videoPlayer.time = event_value`, handle each `event_id` once, then SideDisplay sends `video_time` once.
+- Seeking only works once the train is running (playing or paused), never before 48.25s, never past the end, and never changes `stage` / `playing`.
+
+Sound sliders on the tablet: **Background Music** = train running sound (Node), **Ambient Sound** = ambient loop (Node), **Narrator Voice** = the Side display's audio (Unity: `audioSource.volume = volumes.narrator_voice`), **Brightness** = `lights_level`. Settings are saved in `settings.json` and survive a restart.
+
+Rule for the Unity apps: act only when `stage` or `playing` **changes** from the previous message, not on every message.
 
 Video timings (side pauses at 36.14s and 48.25s, the train moving off) are baked into
 the videos and synced in Unity; the server only says which step it is. The
@@ -146,6 +166,8 @@ actually changes (plus immediately on connect). Nothing is sent while idle.
 | `server` | Always `"train-sim-gateway"` — how the tablet app recognises this server when it scans the network. |
 | `ambient_on` | Whether the server's ambient loop is on (off = muted, continues instantly when switched back on). |
 | `volumes.*` | Per-channel volume `0`–`1`. Each app applies the channels it plays. |
+| `video_time` | Main train video position in seconds, as last reported by the main screen (`video_time` command). Drives the tablet timeline. |
+| `video_duration` | Length of the main train video in seconds (`0` until the main screen reports it). |
 | `metrics` | Placeholder for the metrics screens, TBD. |
 | `event` | One-shot event carried by this message only, `""` otherwise: `horn`, `seek`, `seek_relative`. |
 | `event_id` | Increments on every event — use it to never handle the same event twice. |
@@ -172,9 +194,16 @@ command; every connected screen gets the resulting state.
 { "type": "set_ambient", "on": false }
 { "type": "seek", "time": 755.0 }
 { "type": "seek_relative", "delta": 10 }
+{ "type": "video_time", "time": 123.4, "duration": 612.5 }
 ```
 
 `seek` / `seek_relative` use **absolute seconds**, not 0–1.
+Seeks only work while `stage` is `running` (playing or paused) and are never earlier than **48.25s** (the main video's static frames before the train moves; `SEEK_MIN` env). A seek never changes `stage` or `playing` — it's a one-shot event the screens apply to their videos. Back/forward (`seek_relative`) is converted by Node into an absolute `seek` from the last `video_time`, so screens only ever handle `event: "seek"` (`event_value` = time to jump to).
+
+**Main screen only:** send `video_time` about twice a second while the train
+video is loaded (and once right after any seek), with the VideoPlayer's
+`time` and `length`. The tablet's timeline follows it, so it stays in sync
+with the real video instead of guessing.
 
 The Unity **screens on the exhibit PC can't play or pause** — `play`, `pause`,
 `simulation_open` and `simulation_close` from apps on the PC itself are
@@ -198,6 +227,7 @@ sends nothing).
 | `ALLOW_LOCAL_PLAYBACK` | off | Set to `1` only if a controller app (not a screen) runs on the exhibit PC — otherwise play/pause from apps on the PC itself is ignored |
 | `AMBIENT_FILE` | `assets/ambient.wav` | Ambient loop, PCM `.wav` (not in git — copy it over) |
 | `HORN_FILE` | `assets/horn.wav` | Horn sound, PCM `.wav` (not in git — copy it over) |
+| `TRAIN_FILE` | `assets/train-running.wav` | Train running (engine) ambience: loops while the train moves (`playing`), stops on pause/restart, volume = tablet's **Background Music** slider. 16-bit PCM `.wav` (not in git — copy it over) |
 | `ARDUINO_PORT` | auto-detect | Force a serial port, e.g. `COM5` |
 | `LEVER_SOURCE` | `tca` | `yoke` / `simulated` for dev only |
 
@@ -205,5 +235,4 @@ sends nothing).
 
 - Door hardware: `src/lib/door-controller.js`
 - Lighting hardware: `src/lib/lights-controller.js`
-- Playback position for the tablet timeline (needs the main screen app to report its video time)
 - A second button on the Thrustmaster for the horn — its button bytes haven't been mapped from raw HID data yet

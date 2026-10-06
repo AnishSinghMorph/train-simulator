@@ -27,6 +27,7 @@ const clamp01 = (v) => Math.max(0, Math.min(1, Number(v) || 0));
 
 const PS1 = path.join(__dirname, '..', '..', 'scripts', 'windows', 'sound-player.ps1');
 const RESTART_MS = 3000;
+const MAX_FAILED_STARTS = 3; // a file Windows can't play would otherwise relaunch PowerShell forever
 
 class SoundPlayer {
   constructor(name, file, { volume = 1 } = {}) {
@@ -38,6 +39,7 @@ class SoundPlayer {
     this._ready = false;
     this._pending = null;
     this._stopped = false;
+    this._failedStarts = 0;
     this.isLooping = false;
   }
 
@@ -116,6 +118,7 @@ class SoundPlayer {
       if (text.includes('VOLUME_FAIL')) this._log.warn(`could not set volume live (${text.trim()})`);
       if (!text.includes('READY')) return;
       this._ready = true;
+      this._failedStarts = 0;
       proc.stdin.write(`volume ${this._volume}\n`);
       this._log.info(`ready (pre-loaded) — ${this._file}`);
       const next = this._pending || (this.isLooping ? 'loop' : null);
@@ -125,9 +128,15 @@ class SoundPlayer {
     proc.stderr.on('data', (buf) => this._log.error(buf.toString().trim()));
     proc.on('error', (err) => this._log.error('failed to start PowerShell player:', err.message));
     proc.on('exit', (code) => {
+      const wasReady = this._ready;
       this._ready = false;
       this._proc = null;
       if (this._stopped) return;
+      if (!wasReady && ++this._failedStarts >= MAX_FAILED_STARTS) {
+        this._disabled = true;
+        this._log.error(`gave up after ${MAX_FAILED_STARTS} failed starts — this sound is disabled. Check the file is 16-bit PCM WAV: ${this._file}`);
+        return;
+      }
       this._log.warn(`player exited (code ${code}) — restarting in ${RESTART_MS / 1000}s`);
       setTimeout(() => this._startWindowsPlayer(), RESTART_MS);
     });

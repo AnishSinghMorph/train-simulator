@@ -10,12 +10,14 @@
  * (Windows production: scripts\windows\start-server.bat).
  */
 
+const fs = require('fs');
 const path = require('path');
 const WebSocket = require('ws');
 const { createInputs } = require('./lib/data-source');
 const { Controller } = require('./lib/controller');
 const { AppLauncher } = require('./lib/app-launcher');
 const { SoundPlayer } = require('./lib/sound-player');
+const { screenKey } = require('./lib/screen-filter');
 const { createLogger } = require('./lib/log');
 
 const log = createLogger('server');
@@ -31,6 +33,8 @@ const ASSETS = path.join(__dirname, '..', 'assets');
 
 const hornPlayer = new SoundPlayer('horn', process.env.HORN_FILE || path.join(ASSETS, 'horn.wav'));
 const ambientPlayer = new SoundPlayer('ambient', process.env.AMBIENT_FILE || path.join(ASSETS, 'ambient.wav'), { volume: AMBIENT_VOLUME });
+// Engine / train running ambience: plays while the train moves, volume = tablet's Background Music.
+const trainPlayer = new SoundPlayer('train', process.env.TRAIN_FILE || path.join(ASSETS, 'train-running.wav'));
 const inputs = createInputs();
 
 const wss = new WebSocket.Server({ port: PORT, perMessageDeflate: false }, () => {
@@ -61,12 +65,42 @@ function waitForScreens(count) {
   });
 }
 
-const controller = new Controller({ appLauncher: new AppLauncher(), hornPlayer, ambientPlayer, waitForScreens, ambientVolume: AMBIENT_VOLUME });
+// Tablet settings (volumes, ambient on/off, brightness) survive a server restart.
+const SETTINGS_FILE = process.env.SETTINGS_FILE || path.join(__dirname, '..', 'settings.json');
+function loadSettings() {
+  try {
+    return JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf8'));
+  } catch {
+    return {}; // first run, or an unreadable file: defaults
+  }
+}
+let savedSettings = '';
+let saveTimer = null;
+function saveSettings(settings) {
+  const text = JSON.stringify(settings, null, 2);
+  if (text === savedSettings) return;
+  savedSettings = text;
+  clearTimeout(saveTimer); // a slider being dragged writes once, when it settles
+  saveTimer = setTimeout(() => {
+    fs.writeFile(SETTINGS_FILE, text, (err) => { if (err) log.warn(`could not save settings: ${err.message}`); });
+  }, 500);
+}
+
+const controller = new Controller({ appLauncher: new AppLauncher(), hornPlayer, ambientPlayer, trainPlayer, waitForScreens, ambientVolume: AMBIENT_VOLUME, saved: loadSettings() });
+savedSettings = JSON.stringify(controller.settings(), null, 2);
 
 controller.on('broadcast', (state) => {
+  saveSettings(controller.settings());
   const payload = JSON.stringify(state);
+  const key = screenKey(state);
   for (const client of wss.clients) {
-    if (client.readyState === WebSocket.OPEN) client.send(payload);
+    if (client.readyState !== WebSocket.OPEN) continue;
+    // Screens on this PC only hear about changes they use (see screen-filter.js).
+    if (client.isLocal && key !== null) {
+      if (key === client.lastScreenKey) continue;
+      client.lastScreenKey = key;
+    }
+    client.send(payload);
   }
 });
 
@@ -99,7 +133,9 @@ wss.on('connection', (ws, req) => {
   log.info(`client connected: ${from} (${wss.clients.size} total)`);
 
   // New/reconnecting clients get the current state immediately.
-  ws.send(JSON.stringify(controller.snapshot()));
+  const first = controller.snapshot();
+  ws.lastScreenKey = screenKey(first);
+  ws.send(JSON.stringify(first));
 
   ws.on('pong', () => { ws.isAlive = true; });
   ws.on('message', (raw) => handleClientMessage(raw, from, ws.isLocal));
@@ -133,6 +169,7 @@ inputs.on('lever', (lever) => controller.setLever(lever));
 
 hornPlayer.start();
 ambientPlayer.start();
+trainPlayer.start();
 inputs.start();
 
 function shutdown() {
@@ -141,6 +178,7 @@ function shutdown() {
   inputs.stop();
   hornPlayer.shutdown();
   ambientPlayer.shutdown();
+  trainPlayer.shutdown();
   wss.close(() => process.exit(0));
   setTimeout(() => process.exit(0), 1000).unref();
 }
