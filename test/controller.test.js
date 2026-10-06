@@ -11,13 +11,16 @@ function setup({ screensUp = true } = {}) {
     stop() { this.isLooping = false; calls.ambientStop++; },
     setVolume(v) { calls.ambientVolume = v; }
   };
+  calls.trainFrom = [];
   const trainPlayer = {
-    isLooping: false,
-    loop() { this.isLooping = true; calls.trainLoop = (calls.trainLoop || 0) + 1; },
-    stop() { this.isLooping = false; calls.trainStop = (calls.trainStop || 0) + 1; },
+    playFrom(sec) { calls.trainFrom.push(sec); },
+    stop() { calls.trainStop = (calls.trainStop || 0) + 1; },
     setVolume(v) { calls.trainVolume = v; }
   };
+  const clock = { t: 1000000 };
+  calls.clock = clock;
   const controller = new Controller({
+    now: () => clock.t,
     trainPlayer,
     appLauncher: {
       launch: async () => { calls.launch++; return { screens: 7, launched: !calls.alreadyOpen }; },
@@ -305,17 +308,47 @@ test('video_time from the main screen is passed on for the tablet timeline', () 
   assert.strictEqual(sent.length, n);
 });
 
-test('train running sound: loops while the train runs, stops on pause, restarts on resume', () => {
+test('train sound starts with the train moving off (48.25s into the soundtrack), not at the engine step', () => {
   const { controller, calls } = setup();
   controller.handleCommand({ type: 'start_engine', force: true });
-  assert.strictEqual(calls.trainLoop, undefined); // engine on, train still at the station
+  assert.deepStrictEqual(calls.trainFrom, []); // engine on, train still at the station
   controller.handleCommand({ type: 'accelerate', force: true });
-  assert.strictEqual(calls.trainLoop, 1);
+  assert.deepStrictEqual(calls.trainFrom, [48.25]);
+});
+
+test('pause stops the train sound; resume continues where it was, not from the top', () => {
+  const { controller, calls } = setup();
+  controller.handleCommand({ type: 'accelerate', force: true });
+  calls.clock.t += 20000; // 20 s of running
   controller.handleCommand({ type: 'pause' });
   assert.strictEqual(calls.trainStop, 1);
+  calls.clock.t += 60000; // paused for a minute: the soundtrack doesn't move
   controller._lastRun.play = 0;
   controller.handleCommand({ type: 'play' });
-  assert.strictEqual(calls.trainLoop, 2);
+  assert.deepStrictEqual(calls.trainFrom, [48.25, 68.25]);
+});
+
+test('the video time reported by SideDisplay is the position the sound follows', () => {
+  const { controller, calls } = setup();
+  controller.handleCommand({ type: 'accelerate', force: true });
+  controller.handleCommand({ type: 'pause' });
+  controller.handleCommand({ type: 'video_time', time: 300, duration: 516.92 });
+  controller._lastRun.play = 0;
+  controller.handleCommand({ type: 'play' });
+  assert.strictEqual(calls.trainFrom.at(-1), 300);
+});
+
+test('a timeline seek moves the sound with the video (now if playing, on resume if paused)', () => {
+  const { controller, calls } = setup();
+  controller.handleCommand({ type: 'accelerate', force: true });
+  controller.handleCommand({ type: 'seek', time: 200 });
+  assert.strictEqual(calls.trainFrom.at(-1), 200);
+  controller.handleCommand({ type: 'pause' });
+  controller.handleCommand({ type: 'seek', time: 400 });
+  assert.strictEqual(calls.trainFrom.at(-1), 200); // paused: stays silent
+  controller._lastRun.play = 0;
+  controller.handleCommand({ type: 'play' });
+  assert.strictEqual(calls.trainFrom.at(-1), 400);
 });
 
 test('train running sound follows the Background Music slider', () => {
@@ -324,11 +357,14 @@ test('train running sound follows the Background Music slider', () => {
   assert.strictEqual(calls.trainVolume, 0.4);
 });
 
-test('restart stops the train running sound', async () => {
+test('restart stops the train sound, and the next run starts at the train moving off again', async () => {
   const { controller, calls } = setup();
   controller.handleCommand({ type: 'accelerate', force: true });
+  calls.clock.t += 30000;
   controller.handleCommand({ type: 'restart_apps' });
   assert.strictEqual(calls.trainStop, 1);
+  controller.handleCommand({ type: 'accelerate', force: true });
+  assert.strictEqual(calls.trainFrom.at(-1), 48.25);
 });
 
 test('saved tablet settings (volumes, ambient on/off, lights) are restored at start', () => {
@@ -379,4 +415,17 @@ test('back/forward become an absolute seek from the last reported video time, ke
   assert.deepStrictEqual([sent.at(-1).event, sent.at(-1).event_value], ['seek', 516.92]);
   controller.handleCommand({ type: 'seek', time: 9999 });
   assert.strictEqual(sent.at(-1).event_value, 516.92);
+});
+
+test('opening setup (OPEN APP / S, or RESTART) sets the ambient back to 30% and on', async () => {
+  const { controller, sent, calls } = setup();
+  controller.handleCommand({ type: 'set_volume', channel: 'ambient_sound', level: 0 });
+  controller.handleCommand({ type: 'set_ambient', on: false });
+  controller.handleCommand({ type: 'launch_apps' });
+  assert.strictEqual(sent.at(-1).volumes.ambient_sound, 0.3);
+  assert.strictEqual(sent.at(-1).ambient_on, true);
+  assert.strictEqual(calls.ambientVolume, 0.3);
+  controller.handleCommand({ type: 'set_volume', channel: 'ambient_sound', level: 0.9 });
+  controller.handleCommand({ type: 'restart_apps' });
+  assert.strictEqual(sent.at(-1).volumes.ambient_sound, 0.3);
 });

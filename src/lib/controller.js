@@ -69,14 +69,22 @@ const isLevel = (v) => typeof v === 'number' && Number.isFinite(v) && v >= 0 && 
 class Controller extends EventEmitter {
   // waitForScreens(n) resolves (true/false) once n screens have connected or
   // the wait times out — the server knows who's connected, the controller doesn't.
-  constructor({ appLauncher, hornPlayer, ambientPlayer, trainPlayer = null, waitForScreens, ambientVolume = 0.3, saved = {} }) {
+  constructor({ appLauncher, hornPlayer, ambientPlayer, trainPlayer = null, waitForScreens, ambientVolume = 0.3, saved = {}, now = Date.now }) {
     super();
     if (SIMPLE_FLOW) log.info('SIMPLE MODE: P (or A / lever) plays all videos together at any time — S opens the screens, Space pauses');
     this._apps = appLauncher;
     this._horn = hornPlayer;
     this._ambient = ambientPlayer;
     // Train running sound: loops while the train moves (playing), volume = Background Music.
-    this._train = trainPlayer || { isLooping: false, loop() {}, stop() {}, setVolume() {} };
+    this._train = trainPlayer || { playFrom() {}, stop() {}, setVolume() {} };
+    this._now = now;
+    this._ambientDefault = ambientVolume; // level the ambient starts at every time setup opens
+    // The train sound is the train video's soundtrack (same length, silent until
+    // the train moves off), so it plays at the video's position: where it is
+    // now = pos + time since startedAt while it plays.
+    this._trainOn = false;
+    this._audio = { pos: SEEK_MIN, startedAt: null };
+    this._videoAt = 0; // when SideDisplay last reported video_time
     this._waitForScreens = waitForScreens;
     this._lastRun = {};
     this._eventId = 0;
@@ -199,10 +207,12 @@ class Controller extends EventEmitter {
         return;
       case 'launch_apps':
         log.info(`LAUNCH APPS (from ${from})`);
+        this._resetAmbient();
         this._startAmbientWhenLoaded(this._launch());
         return;
       case 'restart_apps':
         log.info(`RESTART APPS (from ${from})`);
+        this._resetAmbient();
         this._update({ playing: false, stage: 'setup' });
         this._ambient.stop();
         this._startAmbientWhenLoaded(this._apps.restart().then((r) => r.screens));
@@ -250,6 +260,7 @@ class Controller extends EventEmitter {
         // Sent by the main screen ~2x a second; not logged, it's too frequent.
         const ok = (n) => typeof n === 'number' && Number.isFinite(n) && n >= 0;
         if (!ok(cmd.time)) return this._reject(cmd, from, 'time must be seconds >= 0');
+        this._videoAt = this._now();
         this._update({ video_time: cmd.time, video_duration: ok(cmd.duration) ? cmd.duration : this._state.video_duration });
         return;
       }
@@ -292,6 +303,12 @@ class Controller extends EventEmitter {
     this._ambient.loop();
   }
 
+  // Every time setup opens the ambient starts at its default level (30%), switched on.
+  _resetAmbient() {
+    this._update({ volumes: { ...this._state.volumes, ambient_sound: this._ambientDefault }, ambient_on: true });
+    this._applyAmbientVolume();
+  }
+
   // Off mutes rather than stops, so switching back on continues instantly.
   _applyAmbientVolume() {
     this._ambient.setVolume(this._state.ambient_on ? this._state.volumes.ambient_sound : 0);
@@ -303,6 +320,9 @@ class Controller extends EventEmitter {
     const end = this._state.video_duration > 0 ? this._state.video_duration : Infinity;
     const time = Math.round(Math.min(end, Math.max(SEEK_MIN, t)) * 100) / 100;
     log.info(`SEEK to ${time}s (from ${from})`);
+    this._videoAt = 0; // the last reported time is from before the jump
+    this._audio = { pos: time, startedAt: this._trainOn ? this._now() : null };
+    if (this._trainOn) this._train.playFrom(time);
     this._event('seek', time);
   }
 
@@ -335,13 +355,30 @@ class Controller extends EventEmitter {
   // The train running sound plays exactly while the train moves; pause, restart
   // or any other stop of playback silences it (it restarts from the top on resume).
   _syncTrainSound() {
-    if (this._state.playing && !this._train.isLooping) {
-      log.info('train running sound: start');
-      this._train.loop();
-    } else if (!this._state.playing && this._train.isLooping) {
+    if (this._state.playing && !this._trainOn) {
+      const pos = this._soundtrackPosition();
+      this._trainOn = true;
+      this._audio = { pos, startedAt: this._now() };
+      log.info(`train running sound: play from ${pos.toFixed(2)}s`);
+      this._train.playFrom(pos);
+    } else if (!this._state.playing && this._trainOn) {
+      this._trainOn = false;
+      // Leaving the run (restart, earlier step) starts the next one where the train moves off.
+      const pos = this._state.stage === 'running' ? this._soundtrackPosition() : SEEK_MIN;
+      this._audio = { pos, startedAt: null };
       log.info('train running sound: stop');
       this._train.stop();
     }
+  }
+
+  // Where the train video is: SideDisplay's last report if it's recent,
+  // otherwise our own clock (so it also works before Unity reports times).
+  _soundtrackPosition() {
+    const now = this._now();
+    const moving = this._trainOn ? 1 : 0;
+    if (this._videoAt && now - this._videoAt < 3000) return this._state.video_time + moving * (now - this._videoAt) / 1000;
+    const { pos, startedAt } = this._audio;
+    return pos + (startedAt ? (now - startedAt) / 1000 : 0);
   }
 
   _event(name, value = 0) {

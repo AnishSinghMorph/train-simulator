@@ -227,7 +227,7 @@ sends nothing).
 | `ALLOW_LOCAL_PLAYBACK` | off | Set to `1` when testing with the tablet/controller app on the same PC as Node (e.g. in the Unity editor). Apps on the PC can then play/pause and also receive every update (`video_time`, audio). Leave off on the exhibit: there, apps on the PC are the screens |
 | `AMBIENT_FILE` | `assets/ambient.wav` | Ambient loop, PCM `.wav` (not in git — copy it over) |
 | `HORN_FILE` | `assets/horn.wav` | Horn sound, PCM `.wav` (not in git — copy it over) |
-| `TRAIN_FILE` | `assets/train-running.wav` | Train running (engine) ambience: loops while the train moves (`playing`), stops on pause/restart, volume = tablet's **Background Music** slider. 16-bit PCM `.wav` (not in git — copy it over) |
+| `TRAIN_FILE` | `assets/train-running.wav` | The train video's soundtrack (same length, silent until the train moves off). Plays at the video's position: starts at 48.25s on ACCELERATE, stops on pause and resumes where the video is, follows timeline seeks (SideDisplay's `video_time`, or Node's own clock if none is reported). Volume = tablet's **Background Music**. 16-bit PCM `.wav` (not in git — copy it over) |
 | `ARDUINO_PORT` | auto-detect | Force a serial port, e.g. `COM5` |
 | `LEVER_SOURCE` | `tca` | `yoke` / `simulated` for dev only |
 

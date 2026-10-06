@@ -30,7 +30,9 @@ const RESTART_MS = 3000;
 const MAX_FAILED_STARTS = 3; // a file Windows can't play would otherwise relaunch PowerShell forever
 
 class SoundPlayer {
-  constructor(name, file, { volume = 1 } = {}) {
+  // seekable: the file is a soundtrack that can start at any second (playFrom).
+  constructor(name, file, { volume = 1, seekable = false } = {}) {
+    this._seekable = seekable;
     this._log = createLogger(name);
     this._name = name;
     this._volume = clamp01(volume);
@@ -76,6 +78,12 @@ class SoundPlayer {
     this._send('stop');
   }
 
+  // Play once, starting `sec` seconds into the file (seekable players only).
+  playFrom(sec) {
+    this.isLooping = false;
+    this._send(`from ${Math.max(0, Number(sec) || 0).toFixed(2)}`);
+  }
+
   _send(cmd) {
     if (this._disabled) return;
     if (process.platform === 'win32') {
@@ -90,12 +98,17 @@ class SoundPlayer {
   }
 
   _sendMac(cmd) {
+    if (cmd.startsWith('from ')) cmd = 'play-tracked'; // afplay can't start mid-file; dev only
     if (cmd === 'play') {
       spawn('afplay', ['-v', String(this._volume), this._file], { stdio: 'ignore' }).on('error', (err) => this._log.error(err.message));
       return;
     }
     if (this._macLoop) this._macLoop.kill();
     this._macLoop = null;
+    if (cmd === 'play-tracked') {
+      this._macLoop = spawn('afplay', ['-v', String(this._volume), this._file], { stdio: 'ignore' });
+      return;
+    }
     if (cmd === 'loop') {
       const again = () => {
         if (!this.isLooping) return;
@@ -109,7 +122,9 @@ class SoundPlayer {
   _startWindowsPlayer() {
     if (this._stopped) return;
     this._ready = false;
-    const proc = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', PS1, this._file], {
+    const args = ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', PS1, this._file];
+    if (this._seekable) args.push('seek');
+    const proc = spawn('powershell.exe', args, {
       windowsHide: true
     });
     this._proc = proc;

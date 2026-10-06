@@ -34,7 +34,8 @@ const ASSETS = path.join(__dirname, '..', 'assets');
 const hornPlayer = new SoundPlayer('horn', process.env.HORN_FILE || path.join(ASSETS, 'horn.wav'));
 const ambientPlayer = new SoundPlayer('ambient', process.env.AMBIENT_FILE || path.join(ASSETS, 'ambient.wav'), { volume: AMBIENT_VOLUME });
 // Engine / train running ambience: plays while the train moves, volume = tablet's Background Music.
-const trainPlayer = new SoundPlayer('train', process.env.TRAIN_FILE || path.join(ASSETS, 'train-running.wav'));
+// It's the train video's soundtrack: played from the video's position (seekable).
+const trainPlayer = new SoundPlayer('train', process.env.TRAIN_FILE || path.join(ASSETS, 'train-running.wav'), { seekable: true });
 const inputs = createInputs();
 
 const wss = new WebSocket.Server({ port: PORT, perMessageDeflate: false }, () => {
