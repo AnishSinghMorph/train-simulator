@@ -96,7 +96,8 @@ controller.on('broadcast', (state) => {
   for (const client of wss.clients) {
     if (client.readyState !== WebSocket.OPEN) continue;
     // Screens on this PC only hear about changes they use (see screen-filter.js).
-    if (client.isLocal && key !== null) {
+    // (ALLOW_LOCAL_PLAYBACK: testing with the tablet on this same PC -> no filtering.)
+    if (client.isLocal && !ALLOW_LOCAL_PLAYBACK && key !== null) {
       if (key === client.lastScreenKey) continue;
       client.lastScreenKey = key;
     }

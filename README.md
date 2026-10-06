@@ -224,7 +224,7 @@ sends nothing).
 | `APP_EXE` | `QuestRail.exe` | Process checked before launching and killed on restart |
 | `PORT` | `8080` | WebSocket port |
 | `AMBIENT_VOLUME` | `0.3` | Ambient loudness, `0`–`1` |
-| `ALLOW_LOCAL_PLAYBACK` | off | Set to `1` only if a controller app (not a screen) runs on the exhibit PC — otherwise play/pause from apps on the PC itself is ignored |
+| `ALLOW_LOCAL_PLAYBACK` | off | Set to `1` when testing with the tablet/controller app on the same PC as Node (e.g. in the Unity editor). Apps on the PC can then play/pause and also receive every update (`video_time`, audio). Leave off on the exhibit: there, apps on the PC are the screens |
 | `AMBIENT_FILE` | `assets/ambient.wav` | Ambient loop, PCM `.wav` (not in git — copy it over) |
 | `HORN_FILE` | `assets/horn.wav` | Horn sound, PCM `.wav` (not in git — copy it over) |
 | `TRAIN_FILE` | `assets/train-running.wav` | Train running (engine) ambience: loops while the train moves (`playing`), stops on pause/restart, volume = tablet's **Background Music** slider. 16-bit PCM `.wav` (not in git — copy it over) |
